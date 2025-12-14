@@ -36,6 +36,11 @@ export interface InsightCard {
   title: string;
   summary?: string;
   category?: string;
+  type?: 'positive' | 'negative' | 'neutral' | 'suggestion' | 'trend' | 'pattern' | string;
+  description?: string;
+  details?: string;
+  suggestions?: Array<string>;
+  relatedData?: unknown;
 }
 
 export interface NotebookAnalysisConfig {
@@ -67,4 +72,3 @@ export interface AnalysisResult {
   notebookId?: string;
   [key: string]: any;
 }
-

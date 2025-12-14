@@ -24,6 +24,7 @@ interface ParseHistory {
   keywords?: string[] | null;
   parsed_fields?: string | null; // JSON string
   coze_response_data?: string | null; // JSON string
+  created_at?: string | null;
 }
 
 const parseKeywords = (tags?: string | null) => {
@@ -179,6 +180,28 @@ const toBeijingDisplayValue = (value: string) => {
   }
 };
 
+// 从正文中推断标题/作者/时间（与后端保持一致的兜底逻辑）
+const deriveMetaFromContent = (content?: string) => {
+  const lines = (content || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const result: { title?: string | null; author?: string | null; published_at?: string | null } = {
+    title: null,
+    author: null,
+    published_at: null
+  };
+
+  if (lines.length > 0) result.title = lines[0];
+  if (lines.length > 1 && lines[1].length <= 20) result.author = lines[1];
+
+  const dateLine = lines.find((l) => /(\d{4}[./-]\d{1,2}[./-]\d{1,2})|(\d{1,2}:\d{2})/.test(l));
+  if (dateLine) result.published_at = dateLine;
+
+  return result;
+};
+
 const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
   history,
   notebooks,
@@ -200,6 +223,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
   const [title, setTitle] = useState<string>('');
   const [content, setContent] = useState<string>('');
   const [publishedAt, setPublishedAt] = useState<string>('');
+  const [noteCreatedAt, setNoteCreatedAt] = useState<string>(getBeijingNowString());
   const [author, setAuthor] = useState<string>('');
   const [link, setLink] = useState<string>('');
   const [imgUrls, setImgUrls] = useState<string[]>([]);
@@ -516,6 +540,45 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
                         console.log('  ✅ 从 events[].data.content 中提取到 summary:', answerContent.summary);
                         parsedFields.summary = answerContent.summary;
                       }
+                      // 提取其他结构化字段
+                      if (!parsedFields.author && answerContent.author) {
+                        console.log('  ✅ 从 events[].data.content 中提取到 author:', answerContent.author);
+                        parsedFields.author = answerContent.author;
+                      }
+                      if (!parsedFields.source_platform && answerContent.source_platform) {
+                        console.log('  ✅ 从 events[].data.content 中提取到 source_platform:', answerContent.source_platform);
+                        parsedFields.source_platform = answerContent.source_platform;
+                      }
+                      if (!parsedFields.note_type && answerContent.note_type) {
+                        console.log('  ✅ 从 events[].data.content 中提取到 note_type:', answerContent.note_type);
+                        parsedFields.note_type = answerContent.note_type;
+                      }
+                      if (!parsedFields.published_at && answerContent.published_at) {
+                        console.log('  ✅ 从 events[].data.content 中提取到 published_at:', answerContent.published_at);
+                        parsedFields.published_at = answerContent.published_at;
+                      }
+                      if (!parsedFields.link && answerContent.link) {
+                        console.log('  ✅ 从 events[].data.content 中提取到 link:', answerContent.link);
+                        parsedFields.link = answerContent.link;
+                      }
+                      if (!parsedFields.img_urls && answerContent.img_urls) {
+                        const imgUrls = Array.isArray(answerContent.img_urls) 
+                          ? answerContent.img_urls 
+                          : (answerContent.img_urls ? [answerContent.img_urls] : []);
+                        if (imgUrls.length > 0) {
+                          console.log('  ✅ 从 events[].data.content 中提取到 img_urls:', imgUrls.length, '个');
+                          parsedFields.img_urls = imgUrls;
+                        }
+                      }
+                      if (!parsedFields.keywords && answerContent.keywords) {
+                        const keywords = Array.isArray(answerContent.keywords) 
+                          ? answerContent.keywords 
+                          : (answerContent.keywords ? [answerContent.keywords] : []);
+                        if (keywords.length > 0) {
+                          console.log('  ✅ 从 events[].data.content 中提取到 keywords:', keywords.length, '个');
+                          parsedFields.keywords = keywords;
+                        }
+                      }
                     }
                   } catch (e) {
                     console.log('    - 解析 events[].data.content 失败:', e);
@@ -646,6 +709,27 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
       } else {
         console.warn('⚠️ coze_response_data 为空或未定义');
       }
+
+      // 后端已提供结构化 JSON，前端仅做极简兜底
+      parsedFields = parsedFields && typeof parsedFields === 'object' ? parsedFields : {};
+      const derivedFromContent = deriveMetaFromContent(parsedFields.content || history.parsed_content || '');
+
+      // 清理异常的标题/时间（避免把 Coze 的助手前置话术当成标题/时间）
+      const looksLikeHelperText = (text?: string) =>
+        typeof text === 'string' &&
+        (text.includes('我来帮您解析这个链接的文章内容') || text.includes('让我先提取文章的具体信息'));
+
+      if (looksLikeHelperText(parsedFields.title) || (parsedFields.title || '').length > 120) {
+        parsedFields.title = derivedFromContent.title || parsedFields.title;
+      }
+
+      const datePattern = /(\d{4}[./-]\d{1,2}[./-]\d{1,2})|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/;
+      if (
+        looksLikeHelperText(parsedFields.published_at) ||
+        (parsedFields.published_at && !datePattern.test(parsedFields.published_at))
+      ) {
+        parsedFields.published_at = derivedFromContent.published_at || parsedFields.published_at;
+      }
       
       // 按照用户要求的字段映射填充各个字段（优先使用 parsed_fields）
       // Title - 短文本组件
@@ -703,6 +787,14 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
       console.log('🔍 提取 published_at:', publishedAtValue);
       // 转换为 YYYY-MM-DD HH:mm 格式；如果没有时间，则默认使用当前北京时间
       setPublishedAt(toBeijingDisplayValue(publishedAtValue || ''));
+
+      // note_created_at - 与发布时间区分，默认当前时间
+      const noteCreatedAtValue =
+        parsedFields.note_created_at ||
+        history.created_at ||
+        '';
+      console.log('🔍 提取 note_created_at:', noteCreatedAtValue);
+      setNoteCreatedAt(toBeijingDisplayValue(noteCreatedAtValue || ''));
       
       // author - 短文本组件
       const authorValue = parsedFields.author || history.parsed_author || '';
@@ -768,6 +860,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
         content: content.trim() || null,
         summary: summary.trim() || null,
         published_at: publishedAt.trim() || null,
+        note_created_at: noteCreatedAt.trim() || null,
         author: author.trim() || null,
         link: link.trim() || null,
         img_urls: imgUrls.filter(url => url.trim()),
@@ -807,7 +900,10 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
       <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-900">编辑解析历史</h2>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">编辑解析历史</h2>
+            <p className="text-xs text-slate-400 mt-1">ID: <span className="font-mono">{history.id}</span></p>
+          </div>
           <button
             onClick={onClose}
             className="text-slate-400 hover:text-slate-600 transition-colors"
@@ -839,7 +935,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入标题..."
             />
                 </div>
@@ -851,7 +947,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="url"
               value={link}
               onChange={(e) => setLink(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入链接..."
             />
               </div>
@@ -863,7 +959,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="text"
               value={sourcePlatform}
               onChange={(e) => setSourcePlatform(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入来源平台..."
             />
           </div>
@@ -875,22 +971,35 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="text"
               value={author}
               onChange={(e) => setAuthor(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入作者..."
             />
             </div>
 
           {/* 创建时间 */}
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">创建时间（北京时间）</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">提取日期（多为发布时间）</label>
             <input
               type="text"
               value={publishedAt}
               onChange={(e) => setPublishedAt(e.target.value ? e.target.value : '')}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
             />
             <p className="mt-1 text-xs text-slate-400">格式示例：2025-12-04 11:03（北京时间）</p>
             </div>
+
+          {/* 笔记创建时间 */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">笔记创建时间（默认现在）</label>
+            <input
+              type="text"
+              value={noteCreatedAt}
+              onChange={(e) => setNoteCreatedAt(e.target.value ? e.target.value : '')}
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
+              placeholder="如：2025-12-07 17:20"
+            />
+            <p className="mt-1 text-xs text-slate-400">用于与提取日期区分，默认当前北京时间。</p>
+          </div>
 
           {/* 笔记类型 */}
           <div>
@@ -899,7 +1008,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="text"
               value={noteType}
               onChange={(e) => setNoteType(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入笔记类型..."
             />
           </div>
@@ -919,7 +1028,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
                         newUrls[index] = e.target.value;
                         setImgUrls(newUrls);
                       }}
-                      className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                      className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                       placeholder="输入图片URL..."
                     />
                     <button
@@ -945,7 +1054,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               ))}
               <button
                 onClick={() => setImgUrls([...imgUrls, ''])}
-                className="w-full px-3 py-2 text-sm text-purple-600 hover:bg-purple-50 rounded-lg border border-purple-200 transition-colors"
+                className="w-full px-3 py-2 text-sm text-[#0a917a] hover:bg-[#eef6fd] rounded-lg border border-[#b5ece0] transition-colors"
               >
                 + 添加图片URL
               </button>
@@ -959,13 +1068,13 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               type="text"
               value={keywords}
               onChange={(e) => setKeywords(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="输入关键词，用逗号分隔..."
             />
             {keywords && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {keywords.split(',').map((kw, i) => kw.trim() && (
-                  <span key={i} className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-700">
+                  <span key={i} className="px-2 py-1 text-xs rounded-full bg-[#d4f3ed] text-[#0a6154]">
                     {kw.trim()}
                   </span>
                 ))}
@@ -980,7 +1089,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
               rows={4}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200 resize-y"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0] resize-y"
               placeholder="输入摘要..."
             />
           </div>
@@ -994,13 +1103,13 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               value={linkPromptValue}
               onChange={(e) => setLinkPromptValue(e.target.value)}
               rows={3}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200 resize-y"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0] resize-y"
               placeholder="编辑用于生成 AI 摘要的提示词，例如：请根据文章内容生成不超过 5 条的要点摘要……"
             />
             <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
               <button
                 type="button"
-                className="inline-flex items-center rounded-lg bg-[#1a1a1a] px-3 py-1.5 font-medium text-white shadow-sm shadow-purple-500/30 hover:bg-black"
+                className="inline-flex items-center rounded-lg bg-[#06c3a8] px-3 py-1.5 font-medium text-white shadow-sm shadow-[#8de2d5] hover:bg-black"
                 onClick={() => {
                   const next = linkPromptValue.trim();
                   if (next) {
@@ -1021,7 +1130,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
           {history.suggested_notebook_name && (
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">AI推荐笔记本</label>
-              <div className="text-sm text-slate-600 bg-purple-50 px-3 py-2 rounded-lg">
+              <div className="text-sm text-slate-600 bg-[#eef6fd] px-3 py-2 rounded-lg">
                 {history.suggested_notebook_name}
                 {history.suggested_notebook_id && ` (ID: ${history.suggested_notebook_id})`}
               </div>
@@ -1034,7 +1143,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
             <select
               value={assignedNotebookId}
               onChange={(e) => setAssignedNotebookId(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
             >
               <option value="">未分配</option>
               {notebooks.map(nb => (
@@ -1051,7 +1160,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
             <select
               value={status}
               onChange={(e) => setStatus(normalizeHistoryStatus(e.target.value))}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
             >
               <option value="解析中">解析中</option>
               <option value="解析成功">解析成功</option>
@@ -1066,7 +1175,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={4}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
               placeholder="添加备注信息..."
             />
           </div>
@@ -1076,7 +1185,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
             <label className="block text-sm font-medium text-slate-700 mb-2">
               内容
               {history.assigned_notebook_id && (
-                <span className="ml-2 text-xs text-purple-600 font-normal">
+                <span className="ml-2 text-xs text-[#0a917a] font-normal">
                   (编辑后保存将同步到分配的笔记本)
                 </span>
               )}
@@ -1085,7 +1194,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={Math.min(30, Math.max(8, Math.ceil((content || '').length / 80)))}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200 resize-y"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0] resize-y"
               style={{ minHeight: '200px' }}
               placeholder="输入内容..."
             />
@@ -1107,7 +1216,7 @@ const ParseHistoryEditModal: React.FC<ParseHistoryEditModalProps> = ({
             <button
               onClick={handleSave}
               disabled={loading}
-              className="px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
+              className="px-4 py-2 text-sm font-medium text-white bg-[#06c3a8] rounded-lg hover:bg-[#04b094] disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
             >
               {loading ? '保存中...' : '保存'}
             </button>

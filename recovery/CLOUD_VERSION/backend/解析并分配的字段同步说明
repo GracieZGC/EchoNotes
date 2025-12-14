@@ -1,0 +1,61 @@
+# 解析并分配字段同步需求
+
+## 背景
+
+- 链接解析与手动键入两条入口都可以生成笔记/解析历史，字段来源丰富，现有 Notebook 组件与解析字段并不一致。
+- 用户希望以“解析出的字段”为基准，随时定义一个 Notebook 应该包含哪些字段；解析/分配时自动套用模板，解析后也能调整字段并同步 Notebook 组件。
+- 模板需要记住“最近一次选择的 Notebook + 字段勾选情况”，并在两个入口之间共享逻辑。
+
+## 概念
+
+1. **字段模板（Field Template）**
+   - 绑定 Notebook + Source（链接解析 / 键入笔记）。
+   - 保存字段清单：`[{ key, label, enabled, order }]`。
+   - 默认模板为“解析结果中所有字段全部启用”。
+   - 模板与 Notebook 组件配置双向同步：Notebook 新增/删除组件 => 模板更新；模板调整 => Notebook 组件更新。
+
+2. **最后一次 Notebook 记录**
+   - 每个入口需要记住“上一次使用的 Notebook ID”，以便下一次打开时自动选中。
+
+## 流程
+
+1. **解析前**
+   - 用户在“字段模板”弹窗里选择 Notebook、勾选字段。
+   - 模板保存到后端（按 Notebook + Source）。
+   - 两条入口共享逻辑，但分别记住各自最近使用的 Notebook。
+
+2. **执行解析**
+   - 请求体携带当前模板信息（Notebook ID + 字段列表）。
+   - 后端只将模板勾选的字段写入 `parsed_fields` 并同步到 Notebook 组件；未选字段存入附加数据。
+
+3. **解析后调整**
+   - 在解析历史编辑弹窗里，用户可以禁用某个字段：
+     - 更新模板（对应该 Notebook + Source）。
+     - 同步 Notebook 组件（删除对应组件/字段）。
+   - 不支持新增字段（已经解析完成），只能在 Notebook 设置里新增组件，然后模板随之更新。
+
+4. **Notebook 配置变更**
+   - Notebook 组件新增 => 模板追加对应字段并默认启用。
+   - Notebook 组件删除 => 模板与已存解析历史都删除该字段。
+
+## 功能需求
+
+1. **后端**
+   - 新表 `notebook_field_templates`：存储 Notebook + Source 维度的字段配置。
+   - 新表 `field_template_preferences`：存储每个 Source 最近一次使用的 Notebook。
+   - API
+     - `GET /api/notebooks/:id/field-template?source=link|manual`
+     - `PUT /api/notebooks/:id/field-template`（保存字段列表）
+     - `GET /api/field-template/last-used?source=link|manual`
+     - `PUT /api/field-template/last-used`
+   - 解析/分配接口支持接收 `fieldTemplate` 参数并按模板裁剪字段。
+
+2. **前端**
+   - `AINoteImportPage` 两个入口按钮旁新增“字段模板”配置按钮，弹窗可选 Notebook、勾选字段、保存模板。
+   - 记住每个入口最近使用的 Notebook（通过 API / 模板接口）。
+   - 解析/分配时随请求发送模板信息。
+   - 解析历史编辑弹窗同步字段状态（禁用 => 调整模板 + Notebook 组件）。
+
+3. **数据一致性**
+   - 每条笔记固定绑定一个 Notebook，字段模板生效后所有入口使用同一套字段。
+   - 提供“恢复默认/应用 Notebook 配置”操作，便于重置。

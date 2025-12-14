@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import apiClient, { getNotebooks, Notebook as ApiNotebook } from '../apiClient';
 import { AnalysisResult, NotebookType } from '../types/Analysis';
-import { getAnalysisUrl, getFullAnalysisUrl, getShortAnalysisId } from '../utils/analysisId';
+import { getFullAnalysisUrl, getShortAnalysisId } from '../utils/analysisId';
 
 // 分析结果项组件
 const AnalysisItem = ({
@@ -91,9 +91,21 @@ const AnalysisItem = ({
   const idSuffix = analysis.id ? `#${getShortAnalysisId(analysis.id)}` : '';
   const componentCount = getComponentsCount();
 
+  const componentLabelMap: Record<string, string> = {
+    chart: '图表',
+    'ai-custom': 'AI分析',
+    insight: 'AI分析',
+    summary: '摘要',
+    trend: '趋势'
+  };
+
   const metrics = [
     { label: '分析笔记', value: `${getNoteCount() ?? '—'} 条` },
-    { label: '分析组件', value: `${componentCount || 0} 个` }
+    { 
+      label: '分析组件', 
+      value: `${componentCount || 0} 个`,
+      components: analysis.selectedAnalysisComponents || []
+    }
   ];
 
   const handleShare = async () => {
@@ -131,8 +143,8 @@ const AnalysisItem = ({
     <div className="relative rounded-lg border border-slate-200 bg-white px-4 py-4 hover:shadow-md transition-shadow">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-start gap-3 flex-1 min-w-0">
-          <div className="w-16 h-12 bg-gradient-to-br from-purple-100 to-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="w-16 h-12 bg-gradient-to-br from-[#d4f3ed] to-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-[#0a917a]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
           </div>
@@ -142,24 +154,23 @@ const AnalysisItem = ({
               {metrics.map(metric => (
                 <span key={metric.label} className="inline-flex items-center gap-1 text-sm text-slate-700">
                   <span className="text-slate-400">·</span>
-                  <span className="text-slate-500">{metric.label}</span>
-                  <span className="font-medium text-purple-600">{metric.value}</span>
+                  <span className="text-slate-500 whitespace-nowrap">{metric.label}</span>
+                  <span className="font-medium text-[#0a917a] whitespace-nowrap">{metric.value}</span>
+                  {metric.components && metric.components.length > 0 && (
+                    <span className="inline-flex items-center gap-1 flex-wrap">
+                      {metric.components.map((component: string) => (
+                        <span
+                          key={component}
+                          className="px-2 py-0.5 rounded-full text-xs font-medium bg-[#eef6fd] text-[#0a917a] border border-[#d4f3ed]"
+                        >
+                          {componentLabelMap[component] || component}
+                        </span>
+                      ))}
+                    </span>
+                  )}
                 </span>
               ))}
             </div>
-
-          {analysis.selectedAnalysisComponents && analysis.selectedAnalysisComponents.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap">
-              {analysis.selectedAnalysisComponents.map((component) => (
-                <span
-                  key={component}
-                  className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-50 text-purple-600 border border-purple-100"
-                >
-                  {component}
-                </span>
-              ))}
-            </div>
-          )}
 
           <div className="text-xs text-slate-400 flex flex-col sm:flex-row sm:items-center gap-2 mt-6">
             <div>创建时间：{formattedCreatedAt}</div>
@@ -237,7 +248,7 @@ const AnalysisItem = ({
       </div>
       <button
         onClick={() => onAnalysisClick(analysis.id)}
-        className="absolute bottom-3 right-3 px-3 py-1.5 text-xs text-white bg-[#1a1a1a] rounded-lg hover:bg-[#2b2b2b] shadow-sm transition-colors"
+        className="absolute bottom-3 right-3 px-3 py-1.5 text-xs text-white bg-[#06c3a8] rounded-lg hover:bg-[#04b094] shadow-sm transition-colors"
       >
         查看详情
       </button>
@@ -398,7 +409,7 @@ const AnalysisListPage: React.FC = () => {
     return (
       <div className="min-h-screen bg-transparent flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#06c3a8] mx-auto mb-4"></div>
           <p className="text-gray-600">加载分析列表中...</p>
         </div>
       </div>
@@ -412,7 +423,7 @@ const AnalysisListPage: React.FC = () => {
           <p className="text-red-600 mb-4">{error}</p>
           <button 
             onClick={fetchAnalyses}
-            className="px-4 py-2 bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30"
+            className="px-4 py-2 bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5]"
           >
             重试
           </button>
@@ -432,8 +443,11 @@ const AnalysisListPage: React.FC = () => {
           </div>
           
           <button
-            onClick={() => navigate('/AnalysisPage/Select')}
-            className="px-6 py-3 bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors flex items-center gap-2"
+            onClick={() => {
+              // 跳转到未选中笔记本的分析 V2 页面，让用户先选择笔记本
+              navigate('/analysis/v2');
+            }}
+            className="px-6 py-3 bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors flex items-center gap-2"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -443,7 +457,7 @@ const AnalysisListPage: React.FC = () => {
         </div>
 
         {/* 搜索和过滤 */}
-        <div className="rounded-xl p-[1px] mb-6 bg-gradient-to-r from-purple-100/70 via-white to-purple-100/70 shadow-[0_20px_50px_-30px_rgba(124,58,237,0.45)]">
+        <div className="rounded-xl p-[1px] mb-6 bg-gradient-to-r from-[#d4f3ed]/70 via-white to-[#d4f3ed]/70 shadow-[0_20px_50px_-30px_rgba(124,58,237,0.45)]">
           <div className="bg-white rounded-lg p-6 space-y-4">
             <div className="flex flex-col sm:flex-row gap-4">
               <div className="flex-1 relative">
@@ -457,7 +471,7 @@ const AnalysisListPage: React.FC = () => {
                       e.preventDefault();
                     }
                   }}
-                  className="w-full px-4 py-2 pr-10 border border-purple-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-500"
+                  className="w-full px-4 py-2 pr-10 border border-[#90e2d0] rounded-lg focus:outline-none focus:ring-0 focus:border-[#43ccb0]"
                 />
                 <button
                   type="button"
@@ -475,13 +489,13 @@ const AnalysisListPage: React.FC = () => {
                   ref={typeTriggerRef}
                   type="button"
                   onClick={() => setTypeDropdownOpen((v) => !v)}
-                  className="w-full h-[48px] min-h-[48px] px-4 py-3 rounded-xl border border-purple-300 flex items-center justify-between gap-2 transition-colors bg-purple-50 text-purple-800 hover:bg-purple-100 text-[14px] leading-[20px]"
+                  className="w-full h-[48px] min-h-[48px] px-4 py-3 rounded-xl border border-[#90e2d0] flex items-center justify-between gap-2 transition-colors bg-[#eef6fd] text-[#084338] hover:bg-[#d4f3ed] text-[14px] leading-[20px]"
                 >
                   <span className="truncate">
                     {typeOptions.find(opt => opt.value === filterType)?.label || '所有类型'}
                   </span>
                   <svg
-                    className={`w-4 h-4 transition-transform flex-shrink-0 text-purple-700 ${typeDropdownOpen ? 'rotate-180' : ''}`}
+                    className={`w-4 h-4 transition-transform flex-shrink-0 text-[#0a6154] ${typeDropdownOpen ? 'rotate-180' : ''}`}
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -517,11 +531,11 @@ const AnalysisListPage: React.FC = () => {
                             }}
                             className={`w-full text-left px-4 py-2 rounded-lg transition-colors mt-1 flex items-center gap-2 text-[14px] leading-[14px] ${
                               isActive
-                                ? 'bg-purple-50 text-purple-700'
-                                : 'text-gray-900 hover:bg-purple-50'
+                                ? 'bg-[#eef6fd] text-[#0a6154]'
+                                : 'text-gray-900 hover:bg-[#eef6fd]'
                             }`}
                           >
-                            <span className={`w-4 text-sm ${isActive ? 'text-purple-600' : 'text-transparent'}`}>✓</span>
+                            <span className={`w-4 text-sm ${isActive ? 'text-[#0a917a]' : 'text-transparent'}`}>✓</span>
                             <span className="font-medium whitespace-nowrap">{option.label}</span>
                           </button>
                         );
@@ -555,8 +569,13 @@ const AnalysisListPage: React.FC = () => {
                 analysis={analysis}
                 notebookName={resolvedName}
                 notebookIdFallback={rawNotebookId}
-                onAnalysisClick={(analysisId) => {
-                  navigate(getAnalysisUrl(analysisId));
+                onAnalysisClick={() => {
+                  if (rawNotebookId) {
+                    navigate(`/analysis/v2/${rawNotebookId}`);
+                  } else {
+                    // 兼容旧数据：没有 notebookId 时仍然跳转到分析详情页
+                    navigate(`/analysis/${analysis.id}`);
+                  }
                 }}
                 onReanalyze={(currentAnalysis) => {
                   const notebookId = currentAnalysis.metadata?.dataSource?.notebookId 
@@ -610,4 +629,3 @@ const AnalysisListPage: React.FC = () => {
 };
 
 export default AnalysisListPage;
-

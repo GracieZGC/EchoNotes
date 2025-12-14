@@ -4,9 +4,11 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: 'Noto Sans SC', 'Source Han Sans SC', 'Source Han Sans CN',
+    'Noto Sans CJK SC', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', 'Roboto', 'Helvetica Neue',
+    Arial, sans-serif;
+  font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -51,3 +53,162 @@ code {
   background-color: rgba(0, 0, 0, 0.3);
 }
 
+/* === Code block (TypeNotes / TipTap) === */
+.code-block {
+  position: relative;
+  margin: 1.5rem 0;
+}
+
+.code-block .actions {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 10;
+}
+
+.code-block .actions button {
+  border: none;
+  background: #ffffff;
+  color: #4b5563;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.code-block .actions button:hover {
+  background: #f3f4f6;
+  transform: translateY(-1px);
+}
+
+/* highlight.js base */
+.hljs {
+  font-family: 'JetBrains Mono', Consolas, 'SFMono-Regular', Menlo, Monaco, monospace;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: #1f2a37;
+  position: relative;
+  overflow: visible;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #5c6370;
+  font-style: italic;
+}
+
+.hljs-doctag,
+.hljs-keyword,
+.hljs-formula,
+.hljs-built_in,
+.hljs-deletion {
+  color: #9552c3;
+}
+
+.hljs-section,
+.hljs-name,
+.hljs-selector-tag,
+.hljs-subst {
+  color: #dd4b30;
+}
+
+.hljs-literal,
+.hljs-number {
+  color: #208fa4;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta-string,
+.hljs-symbol {
+  color: #0f9d58;
+}
+
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-selector-class,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: #b56b3c;
+}
+
+.hljs-title,
+.hljs-built_in,
+.hljs-keyword {
+  color: #2f7cd0;
+}
+
+pre.hljs,
+pre.hljs code,
+pre[data-line-numbers],
+pre[data-line-numbers] code {
+  background: #fefefe !important;
+  color: inherit;
+}
+
+pre.hljs {
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
+  padding: 1.25rem 1.75rem;
+  margin: 0;
+}
+
+pre.hljs::before,
+pre[data-line-numbers]::before {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  line-height: 1.6;
+  text-align: right;
+  white-space: pre;
+}
+
+pre[data-line-numbers] {
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
+  position: relative;
+  padding: 1.25rem 1.75rem;
+  margin: 0;
+}
+
+pre[data-line-numbers]::before {
+  content: attr(data-line-numbers);
+  position: absolute;
+  top: 1.25rem;
+  left: 1rem;
+}
+
+.copy-code-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  border: none;
+  background: #ffffff;
+  color: #4b5563;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.copy-code-btn:hover {
+  background: #f3f4f6;
+  transform: translateY(-1px);
+}
+
+.copy-code-btn[data-copied] {
+  background: #e0ffe0;
+  color: #047857;
+}

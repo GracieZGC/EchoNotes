@@ -25,7 +25,7 @@ export const renderContentWithLinks = (text: string): React.ReactNode => {
         href={url}
         target="_blank"
         rel="noreferrer"
-        className="text-purple-600 underline underline-offset-2 break-all"
+        className="text-[#0a917a] underline underline-offset-2 break-all"
       >
         {url}
       </a>

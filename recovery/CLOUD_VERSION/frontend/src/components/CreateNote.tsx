@@ -198,16 +198,16 @@ const generatePosition = (
 };
 
 const generateColor = (index: number, total: number): string => {
-  const purpleShades = [
-    'bg-purple-300',
-    'bg-purple-400',
-    'bg-purple-500',
-    'bg-purple-600',
-    'bg-purple-700',
-    'bg-purple-800'
+  const greenShades = [
+    'bg-[#c0f7ec]',
+    'bg-[#90e2d0]',
+    'bg-[#6bd8c0]',
+    'bg-[#43ccb0]',
+    'bg-[#06c3a8]',
+    'bg-[#04b094]'
   ];
-  const shadeIndex = Math.floor((index / total) * purpleShades.length);
-  return purpleShades[Math.min(shadeIndex, purpleShades.length - 1)];
+  const shadeIndex = Math.floor((index / total) * greenShades.length);
+  return greenShades[Math.min(shadeIndex, greenShades.length - 1)];
 };
 
 const generateInstanceId = (type: string) =>
@@ -244,6 +244,7 @@ function CreateNote() {
     radiusXPercent: number;
     radiusYPercent: number;
     rect: DOMRect;
+    bubbleSize: number;
   } | null>(null);
 
   useEffect(() => {
@@ -383,7 +384,7 @@ function CreateNote() {
       const state = dragStateRef.current;
       if (!state) return;
 
-      const { rect, startClientX, startClientY, startX, startY, radiusXPercent, radiusYPercent, id } = state;
+      const { rect, startClientX, startClientY, startX, startY, radiusXPercent, radiusYPercent, id, bubbleSize } = state;
       const dx = event.clientX - startClientX;
       const dy = event.clientY - startClientY;
 
@@ -400,11 +401,11 @@ function CreateNote() {
       let nextX = startX + deltaXPercent;
       let nextY = startY + deltaYPercent;
 
-      const clamped = clampPercentToBounds(nextX, nextY, bubble.size, rect);
+      const clamped = clampPercentToBounds(nextX, nextY, bubbleSize, rect);
       nextX = clamped.x;
       nextY = clamped.y;
 
-      const pushed = pushOutOfButtonZone(nextX, nextY, bubble.size, rect, clamped.bounds);
+      const pushed = pushOutOfButtonZone(nextX, nextY, bubbleSize, rect, clamped.bounds);
       if (pushed.bounced) {
         nextX = pushed.x;
         nextY = pushed.y;
@@ -427,6 +428,7 @@ function CreateNote() {
 
     const handleMouseUp = () => {
       setDraggingId(null);
+      draggingIdRef.current = null;
       dragStateRef.current = null;
     };
 
@@ -473,9 +475,12 @@ function CreateNote() {
       startClientY: event.clientY,
       radiusXPercent: radiusPercents.x,
       radiusYPercent: radiusPercents.y,
-      rect
+      rect,
+      bubbleSize: bubble.size
     };
 
+    // 直接同步 ref，避免点击事件读取到旧的 dragging 状态导致无法跳转
+    draggingIdRef.current = bubble.notebook_id;
     setDraggingId(bubble.notebook_id);
   };
 
@@ -600,7 +605,7 @@ function CreateNote() {
             notebookBubbles.map((bubble) => (
               <div
                 key={bubble.notebook_id}
-                className={`absolute ${bubble.color} rounded-full flex items-center justify-center cursor-pointer transition-all duration-300 hover:scale-110 shadow-xl shadow-purple-500/30`}
+                className={`absolute ${bubble.color} rounded-full flex items-center justify-center cursor-pointer transition-all duration-300 hover:scale-110 shadow-xl shadow-[#8de2d5]`}
                 style={{
                   width: `${bubble.size}px`,
                   height: `${bubble.size}px`,
@@ -666,7 +671,7 @@ function CreateNote() {
                 type="text"
                 value={customNotebookName}
                 onChange={(e) => setCustomNotebookName(e.target.value)}
-                    className="mt-2 w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none"
+                    className="mt-2 w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-[#43ccb0] outline-none"
                     placeholder="例如：财经分析、学习备忘..."
                   />
                 </label>
@@ -676,7 +681,7 @@ function CreateNote() {
                     value={customNotebookDescription}
                     onChange={(e) => setCustomNotebookDescription(e.target.value)}
                     rows={3}
-                    className="mt-2 w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none resize-none"
+                    className="mt-2 w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-[#43ccb0] outline-none resize-none"
                     placeholder="为笔记本提供一句描述，方便 AI 推荐。"
                   />
                 </label>
@@ -699,7 +704,7 @@ function CreateNote() {
                         onClick={() => toggleRecordComponent(component.id)}
                         className={`p-3 border rounded-xl transition-colors text-left ${
                           active
-                            ? 'border-purple-500 bg-purple-50 text-purple-700'
+                            ? 'border-[#43ccb0] bg-[#eef6fd] text-[#0a6154]'
                             : 'border-slate-200 hover:border-slate-300'
                         }`}
                       >
@@ -745,7 +750,7 @@ function CreateNote() {
                                   type="text"
                                   value={instance.title}
                                   onChange={(e) => updateInstanceTitle(instance.id, e.target.value)}
-                                  className="flex-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                                  className="flex-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
                                   placeholder="字段标题"
                                 />
                                 <div className="flex items-center gap-2">
@@ -786,7 +791,7 @@ function CreateNote() {
                         key={component.id}
                         type="button"
                         onClick={() => addAnalysisComponent(component.id)}
-                        className="px-3 py-2 text-xs border border-slate-300 rounded-lg hover:border-purple-400"
+                        className="px-3 py-2 text-xs border border-slate-300 rounded-lg hover:border-[#6bd8c0]"
                       >
                         {component.icon} 添加{component.label}
                       </button>
@@ -825,7 +830,7 @@ function CreateNote() {
                                   type="text"
                                   value={instance.title}
                                   onChange={(e) => updateInstanceTitle(instance.id, e.target.value)}
-                                  className="flex-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                                  className="flex-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
                                   placeholder={`${component.label}标题`}
                                 />
                                 <div className="flex items-center gap-2">
@@ -853,7 +858,7 @@ function CreateNote() {
                                     updateInstanceConfig(instance.id, { prompt: e.target.value })
                                   }
                                   rows={3}
-                                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-none text-sm"
+                                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none resize-none text-sm"
                                   placeholder="输入 AI 提示词，例如：请将内容总结为 5 条投资洞察..."
                                 />
                               )}
@@ -873,7 +878,7 @@ function CreateNote() {
                                         }
                                         className={`p-2 border rounded-lg text-xs flex flex-col items-center gap-1 ${
                                           instance.config?.chartType === chart.id
-                                            ? 'border-purple-500 bg-purple-50 text-purple-700'
+                                            ? 'border-[#43ccb0] bg-[#eef6fd] text-[#0a6154]'
                                             : 'border-slate-200 hover:border-slate-300'
                                         }`}
                                       >
@@ -908,7 +913,7 @@ function CreateNote() {
                   type="button"
                 onClick={handleCreateCustomNotebook}
                   disabled={!customNotebookName.trim() || componentInstances.length === 0}
-                  className="px-5 py-2 rounded-lg bg-[#1a1a1a] text-white shadow-lg shadow-purple-500/30 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                  className="px-5 py-2 rounded-lg bg-[#06c3a8] text-white shadow-lg shadow-[#8de2d5] disabled:bg-slate-300 disabled:cursor-not-allowed"
               >
                 创建笔记本
               </button>

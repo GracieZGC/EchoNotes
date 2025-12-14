@@ -24,6 +24,8 @@ export const consumeCozeStream = (stream) => {
     let finalAnswer = '';
     const events = [];
     let resolved = false;
+    let previewBuffer = ''; // 用于检测 HTML
+    let htmlChecked = false;
 
     const finish = () => {
       if (resolved) return;
@@ -102,6 +104,27 @@ export const consumeCozeStream = (stream) => {
     };
 
     stream.on('data', (chunk) => {
+      // 检查前 2000 字符是否是 HTML（即使 Content-Type 是 application/json，Coze 也可能返回 HTML）
+      if (!htmlChecked) {
+        previewBuffer += chunk.toString('utf8');
+        if (previewBuffer.length >= 200) {
+          const lowerPreview = previewBuffer.toLowerCase();
+          if (lowerPreview.includes('<!doctype') || 
+              lowerPreview.includes('<html') || 
+              lowerPreview.includes('<body') ||
+              (lowerPreview.includes('登录') && (lowerPreview.includes('coze') || lowerPreview.includes('coze.cn'))) ||
+              (lowerPreview.includes('login') && lowerPreview.includes('coze'))) {
+            htmlChecked = true;
+            resolved = true;
+            stream.destroy();
+            console.error(`❌ consumeCozeStream 检测到流内容包含 HTML:`, previewBuffer.substring(0, 500));
+            reject(new Error(`Coze API 返回了 HTML 登录页内容（即使状态码可能是 200，Content-Type 可能是 application/json），说明请求未授权。请检查：1) COZE_API_KEY 格式是否正确（pat_...），2) PAT 是否有 chat 权限，3) BOT_ID 是否与 PAT 所属 workspace 一致，4) 是否使用了个人版 PAT 调用企业/团队 bot`));
+            return;
+          }
+          htmlChecked = true; // 检查完成，不再检查
+        }
+      }
+      
       buffer += chunk;
       const segments = buffer.split('\n\n');
       buffer = segments.pop() || '';

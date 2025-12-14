@@ -52,14 +52,17 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
   // 获取分析详情
   const fetchAnalysisDetail = async () => {
     if (!analysisId) {
+      console.warn('⚠️ [AnalysisDetailPage] 分析ID不存在');
       setError('分析ID不存在');
       setLoading(false);
       return;
     }
 
     try {
+      console.log('🔄 [AnalysisDetailPage] 开始获取分析详情:', analysisId);
       setLoading(true);
       const response = await apiClient.get(`/api/analysis/${analysisId}`);
+      console.log('✅ [AnalysisDetailPage] 获取分析详情响应:', response?.data?.success ? '成功' : '失败', response?.data);
       
       if (response.data.success) {
         setAnalysis(response.data.data);
@@ -241,7 +244,7 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
     return (
       <div className="min-h-screen bg-transparent flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#06c3a8] mx-auto mb-4"></div>
           <p className="text-gray-600">加载分析详情中...</p>
         </div>
       </div>
@@ -255,7 +258,7 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
           <p className="text-red-600 mb-4">{error || '分析结果不存在'}</p>
           <button 
             onClick={() => navigate('/analysis')}
-            className="px-4 py-2 bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30"
+            className="px-4 py-2 bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5]"
           >
             返回分析列表
           </button>
@@ -303,12 +306,12 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
               />
               <button
                 onClick={()=>setAppliedRange({ from: fromDate || undefined, to: toDate || undefined })}
-                className="px-4 py-2 bg-[#1a1a1a] text-white rounded-lg text-sm whitespace-nowrap hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                className="px-4 py-2 bg-[#06c3a8] text-white rounded-lg text-sm whitespace-nowrap hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
               >
                 查询
               </button>
               <div className="px-4 py-2 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700">
-                笔记数：<span className="font-medium text-purple-700">{totalPoints}</span>
+                笔记数：<span className="font-medium text-[#0a6154]">{totalPoints}</span>
               </div>
             </div>
 
@@ -347,14 +350,14 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
                     || (analysis as any).notebookId
                     || '';
                   if (notebookId) {
-                    navigate(`/AnalysisPage/Select/${notebookId}`, { 
+                    navigate(`/analysis/v2/${notebookId}`, { 
                       state: { 
                         sourceAnalysisId: analysis.id,
                         from: location.pathname
                       }
                     });
                   } else {
-                    navigate('/AnalysisPage/Select', { 
+                    navigate('/analysis', { 
                       state: { 
                         sourceAnalysisId: analysis.id,
                         from: location.pathname
@@ -362,7 +365,7 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
                     });
                   }
                 }}
-                className="px-4 py-2 text-sm bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                className="px-4 py-2 text-sm bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
               >
                 重新分析
               </button>
@@ -382,4 +385,3 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
 };
 
 export default AnalysisDetailPage;
-

@@ -30,7 +30,7 @@ function AIAnalysisComponent({
         {onAIClick && (
           <button
             onClick={onAIClick}
-            className="mt-4 inline-flex items-center px-4 py-2 bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+            className="mt-4 inline-flex items-center px-4 py-2 bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
           >
             <span className="mr-2">🤖</span>
             开始AI分析
@@ -57,16 +57,16 @@ function AIAnalysisComponent({
                   insight.type === 'neutral' ? 'bg-blue-100 text-blue-800' :
                   'bg-slate-100 text-slate-800'
                 }`}>
-                  {getInsightIcon(insight.type)}
+                  {getInsightIcon(insight.type || 'neutral')}
                 </div>
               </div>
               <div className="flex-1">
                 <h4 className="font-medium text-gray-900 mb-1" style={{ fontSize: '14px' }}>
-                  {mapTitleToDisplay(insight.title)}
+                  {mapTitleToDisplay(insight.title || '')}
                 </h4>
                 
                 {(() => {
-                  const displayTitle = mapTitleToDisplay(insight.title);
+                  const displayTitle = mapTitleToDisplay(insight.title || '');
                   const isExtensionDirection = displayTitle === '延伸方向';
                   const isNotesPoints = displayTitle === '笔记要点';
                   
@@ -201,14 +201,13 @@ function AIAnalysisComponent({
                 })()}
 
                 {/* 相关数据 */}
-                {insight.relatedData && (
+                {typeof insight.relatedData !== 'undefined' && (
                   <div className="mt-3 p-2 bg-yellow-50/70 rounded border-l-4 border-yellow-300">
                     <div className="font-medium text-yellow-800 mb-1" style={{ fontSize: '12px' }}>相关数据：</div>
-                    <div className="text-yellow-700" style={{ fontSize: '12px' }}>
-                      {typeof insight.relatedData === 'string' 
-                        ? insight.relatedData 
-                        : JSON.stringify(insight.relatedData, null, 2)
-                      }
+                    <div className="text-yellow-700 whitespace-pre-wrap" style={{ fontSize: '12px' }}>
+                      {typeof insight.relatedData === 'string'
+                        ? insight.relatedData
+                        : JSON.stringify(insight.relatedData ?? {}, null, 2)}
                     </div>
                   </div>
                 )}
@@ -223,7 +222,7 @@ function AIAnalysisComponent({
         <div className="text-center pt-4">
           <button
             onClick={onAIClick}
-            className="inline-flex items-center px-6 py-3 bg-[#1a1a1a] text-white rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-all duration-200"
+            className="inline-flex items-center px-6 py-3 bg-[#06c3a8] text-white rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-all duration-200"
           >
             <span className="mr-2">🤖</span>
             与AI助手深入交流
@@ -270,4 +269,3 @@ function mapTitleToDisplay(title: string): string {
 }
 
 export default AIAnalysisComponent;
-

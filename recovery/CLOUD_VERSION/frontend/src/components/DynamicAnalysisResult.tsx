@@ -17,14 +17,17 @@ function DynamicAnalysisResult({ analysisResult, onAIClick, filterDateRange }: D
   // 从analysisData中获取组件配置，如果没有则从根级别获取（向后兼容）
   const selectedComponents = analysisResult.analysisData?.selectedAnalysisComponents || analysisResult.selectedAnalysisComponents;
   const componentConfigs = analysisResult.analysisData?.componentConfigs || analysisResult.componentConfigs;
+  const normalizedComponents = Array.isArray(selectedComponents)
+    ? selectedComponents.map((c: string) => (c === 'insight' ? 'ai-custom' : c))
+    : [];
   
   // 一致化结构：图表类优先，AI 组件最后
-  const orderedComponents = Array.isArray(selectedComponents)
-    ? [...selectedComponents].sort((a, b) => (a === 'ai-custom' ? 1 : 0) - (b === 'ai-custom' ? 1 : 0))
+  const orderedComponents = Array.isArray(normalizedComponents)
+    ? [...normalizedComponents].sort((a, b) => (a === 'ai-custom' ? 1 : 0) - (b === 'ai-custom' ? 1 : 0))
     : [];
   
   // 如果没有选择任何组件，显示提示信息
-  if (!selectedComponents || selectedComponents.length === 0) {
+  if (!normalizedComponents || normalizedComponents.length === 0) {
     return (
       <div className="text-center py-8">
         <div className="text-gray-600 mb-2">未选择分析组件</div>
@@ -38,6 +41,11 @@ function DynamicAnalysisResult({ analysisResult, onAIClick, filterDateRange }: D
     <div className="space-y-6">
       {orderedComponents.map((componentType: string) => {
         // 准备传递给分析组件的数据
+        const aiConfig =
+          componentConfigs?.['ai-custom'] ||
+          componentConfigs?.insight ||
+          analysisResult.analysisData?.componentConfigs?.['ai-custom'] ||
+          analysisResult.analysisData?.componentConfigs?.insight;
         const componentProps = {
           onAIClick,
           // 传递分析结果数据
@@ -47,11 +55,12 @@ function DynamicAnalysisResult({ analysisResult, onAIClick, filterDateRange }: D
               || analysisResult.analysisData?.processedData 
               || analysisResult.data,
             fieldMappings: componentConfigs?.chart?.fieldMappings || [],
+            // 即使 chartConfigs 为空，也传递空数组，让组件自己处理空数据情况
             chartConfigs: componentConfigs?.chart?.chartConfigs || [],
-            insights: componentConfigs?.['ai-custom']?.insights || [],
+            insights: aiConfig?.insights || [],
             metadata: analysisResult.metadata
           },
-          // 传递原始分析结果（用于调试和扩展）
+          // 传递原始分析结果（用于调试和扩展，包含完整的配置信息）
           analysisResult,
           // 标记这是来自分析结果的数据
           fromAnalysis: true,
@@ -94,4 +103,3 @@ function DynamicAnalysisResult({ analysisResult, onAIClick, filterDateRange }: D
 }
 
 export default DynamicAnalysisResult;
-

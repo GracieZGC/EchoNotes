@@ -3,8 +3,24 @@
  * 支持豆包 API 和 OpenAI API
  */
 
+const normalizeBoolean = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return false;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+};
+
 export default class AIService {
   constructor() {
+    // 统一的提供商优先级（环境变量控制）
+    this.aiProviderPreference = (process.env.AI_PROVIDER || '').trim().toLowerCase();
+
+    // Ollama 配置
+    this.ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+    this.ollamaModel = process.env.OLLAMA_MODEL || '';
+    this.useOllama = normalizeBoolean(process.env.USE_OLLAMA);
+    this.ollamaConfigured = !!(this.useOllama && this.ollamaModel && this.ollamaBaseUrl);
+
     // 豆包配置
     this.doubaoBaseUrl = process.env.DOUBAO_BASE_URL || '';
     this.doubaoApiKey = process.env.DOUBAO_API_KEY || '';
@@ -16,11 +32,52 @@ export default class AIService {
     this.openaiBaseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
     this.openaiModel = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
 
-    // 确定使用的提供商
-    this.provider = this.doubaoConfigured ? 'doubao' : (this.openaiApiKey ? 'openai' : 'mock');
+    // 确定使用的提供商优先级
+    this.providerOrder = this._buildProviderOrder();
+    this.provider = this._resolveProvider();
+    console.log('🤖 [AIService] provider resolved', {
+      provider: this.provider,
+      order: this.providerOrder,
+      configured: {
+        ollama: this.ollamaConfigured,
+        doubao: this.doubaoConfigured,
+        openai: !!this.openaiApiKey
+      }
+    });
     
     // Anthropic 配置（可选）
     this.anthropicApiKey = process.env.ANTHROPIC_API_KEY || '';
+  }
+
+  _buildProviderOrder() {
+    const requested = this.aiProviderPreference ? [this.aiProviderPreference] : [];
+    const defaults = ['ollama', 'doubao', 'openai', 'mock'];
+    // 去重并保留顺序
+    return [...new Set([...requested, ...defaults])];
+  }
+
+  _providerAvailable(name) {
+    if (name === 'ollama') return this.ollamaConfigured;
+    if (name === 'doubao') return this.doubaoConfigured;
+    if (name === 'openai') return !!this.openaiApiKey;
+    return name === 'mock';
+  }
+
+  _resolveProvider() {
+    return this.providerOrder.find((p) => this._providerAvailable(p)) || 'mock';
+  }
+
+  async _callProvider(name, messages, options) {
+    if (name === 'ollama') {
+      return await this._callOllamaAPI(messages, options);
+    }
+    if (name === 'doubao') {
+      return await this._callDoubaoAPI(messages, options);
+    }
+    if (name === 'openai') {
+      return await this._callOpenAIAPI(messages, options);
+    }
+    return 'AI 服务未配置，返回模拟响应';
   }
 
   /**
@@ -30,21 +87,62 @@ export default class AIService {
    * @returns {Promise<string>}
    */
   async generateText(prompt, options = {}) {
-    if (this.provider === 'mock') {
-      return 'AI 服务未配置，返回模拟响应';
+    if (!prompt || !prompt.trim()) return '';
+
+    const messages = options.messages || [{ role: 'user', content: prompt }];
+    const temperature = options.temperature ?? 0.7;
+    const maxTokens = options.maxTokens ?? 2000;
+
+    for (const provider of this.providerOrder) {
+      if (!this._providerAvailable(provider) || provider === 'mock') continue;
+      try {
+        return await this._callProvider(provider, messages, { temperature, maxTokens });
+      } catch (error) {
+        console.warn(`⚠️ [AIService] ${provider} 调用失败，尝试下一个:`, error?.message || error);
+      }
     }
 
-    const messages = options.messages || [
-      { role: 'user', content: prompt }
-    ];
-    const temperature = options.temperature || 0.7;
-    const maxTokens = options.maxTokens || 2000;
+    return 'AI 服务未配置，返回模拟响应';
+  }
 
-    if (this.provider === 'doubao') {
-      return this._callDoubaoAPI(messages, { temperature, maxTokens });
-    } else if (this.provider === 'openai') {
-      return this._callOpenAIAPI(messages, { temperature, maxTokens });
+  /**
+   * 调用 Ollama 本地模型
+   * @private
+   */
+  async _callOllamaAPI(messages, options = {}) {
+    if (!this.ollamaConfigured) {
+      throw new Error('Ollama 未配置或已关闭');
     }
+
+    const payload = {
+      model: this.ollamaModel,
+      messages,
+      stream: false,
+      options: {
+        temperature: options.temperature ?? 0.7,
+        num_predict: options.maxTokens ?? 2000
+      }
+    };
+
+    const resp = await fetch(`${this.ollamaBaseUrl.replace(/\/$/, '')}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!resp.ok) {
+      const preview = await resp.text().catch(() => '');
+      throw new Error(`Ollama API error: ${resp.status} ${preview.slice(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const content =
+      data?.message?.content ||
+      data?.choices?.[0]?.message?.content ||
+      data?.output ||
+      '';
+    if (!content) throw new Error('Ollama 响应为空');
+    return typeof content === 'string' ? content : JSON.stringify(content);
   }
 
   /**
@@ -283,24 +381,7 @@ ${text}
    * @returns {Promise<string>}
    */
   async callAI(prompt, options = {}) {
-    // 优先使用豆包
-    if (this.doubaoConfigured) {
-      return await this._callDoubaoAPI([{ role: 'user', content: prompt }], {
-        temperature: options.temperature || 0.7,
-        maxTokens: options.maxTokens || 2000
-      });
-    }
-    // 备用使用 OpenAI
-    else if (this.openaiApiKey) {
-      return await this._callOpenAIAPI([{ role: 'user', content: prompt }], {
-        temperature: options.temperature || 0.7,
-        maxTokens: options.maxTokens || 2000
-      });
-    }
-    // 如果都没有配置，返回空字符串（由上层处理fallback）
-    else {
-      throw new Error('AI服务未配置');
-    }
+    return await this.generateText(prompt, options);
   }
 
   /**
@@ -777,4 +858,3 @@ ${notesSummary}
     ];
   }
 }
-

@@ -81,7 +81,7 @@ const AIModal: React.FC<AIModalProps> = ({ isOpen, onClose, context, notes = [] 
           <button
             onClick={handleAnalyze}
             disabled={loading}
-            className="px-4 py-2 bg-[#1a1a1a] text-white rounded-md hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-[#06c3a8] text-white rounded-md hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             {loading ? '分析中...' : '开始分析'}
           </button>

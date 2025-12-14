@@ -331,7 +331,7 @@ const NoteItem = ({
   return (
     <div 
       className={`bg-white p-3 rounded-xl border border-gray-200 flex items-center justify-between hover:shadow-sm transition-shadow duration-200 cursor-default ${
-        isSelected ? 'ring-2 ring-purple-500 bg-purple-50' : ''
+        isSelected ? 'ring-2 ring-[#43ccb0] bg-[#eef6fd]' : ''
       }`}
       onClick={handleCardClick}
     >
@@ -342,12 +342,12 @@ const NoteItem = ({
               type="checkbox"
               checked={isSelected}
               onChange={() => onSelect(note.id || note.note_id || '')}
-              className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
+              className="h-4 w-4 text-[#0a917a] focus:ring-[#43ccb0] border-gray-300 rounded"
             />
           </div>
         )}
-        <div className="w-16 h-12 bg-gradient-to-br from-purple-100 to-blue-100 rounded-xl flex items-center justify-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="w-16 h-12 bg-gradient-to-br from-[#d4f3ed] to-blue-100 rounded-xl flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-[#0a917a]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
         </div>
@@ -355,7 +355,7 @@ const NoteItem = ({
           {renaming ? (
             <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
               <input 
-                className="border border-purple-300 rounded-lg px-2 py-1 text-sm focus:border-purple-500 focus:ring-1 focus:ring-purple-500 focus:outline-none" 
+                className="border border-[#90e2d0] rounded-lg px-2 py-1 text-sm focus:border-[#43ccb0] focus:ring-1 focus:ring-[#43ccb0] focus:outline-none" 
                 value={newTitle} 
                 onChange={(e)=>setNewTitle(e.target.value)}
                 onClick={(e) => e.stopPropagation()}
@@ -374,7 +374,7 @@ const NoteItem = ({
                     alert('重命名失败，请重试');
                   }
                 }} 
-                className="text-xs px-2 py-1 rounded-lg bg-[#1a1a1a] text-white hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                className="text-xs px-2 py-1 rounded-lg bg-[#06c3a8] text-white hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
               >
                 保存
               </button>
@@ -385,7 +385,7 @@ const NoteItem = ({
                   setRenaming(false); 
                   setNewTitle(note.title);
                 }} 
-                className="text-xs px-2 py-1 rounded-lg border border-purple-300 text-purple-600 hover:bg-purple-50 transition-colors"
+                className="text-xs px-2 py-1 rounded-lg border border-[#90e2d0] text-[#0a917a] hover:bg-[#eef6fd] transition-colors"
               >
                 取消
               </button>
@@ -409,7 +409,7 @@ const NoteItem = ({
             e.stopPropagation();
             setMenuOpen(!menuOpen);
           }} 
-          className="menu-button p-2 rounded-full hover:bg-purple-100"
+          className="menu-button p-2 rounded-full hover:bg-[#d4f3ed]"
           style={{ zIndex: 1000 }}
         >
           <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-gray-500" viewBox="0 0 20 20" fill="currentColor"><path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" /></svg>
@@ -443,7 +443,7 @@ const NoteItem = ({
                 setRenaming(true);
                 setMenuOpen(false);
               }} 
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-purple-50 hover:text-purple-700 transition-colors"
+              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-[#eef6fd] hover:text-[#0a6154] transition-colors"
             >
               重命名
             </button>
@@ -484,7 +484,7 @@ const NoteItem = ({
             e.stopPropagation();
             onNoteClick();
           }} 
-          className="px-1.5 py-0.5 text-xs rounded-xl border border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-200 hover:text-purple-700 transition-colors"
+          className="px-1.5 py-0.5 text-xs rounded-xl border border-gray-300 text-gray-700 hover:bg-[#eef6fd] hover:border-[#b5ece0] hover:text-[#0a6154] transition-colors"
         >
           查看详情
         </button>
@@ -510,6 +510,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
   const lastFetchRef = useRef<Map<string, number>>(new Map());
   
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false); // 首次加载后不再整页loading
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create');
@@ -664,12 +665,14 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
       }
 
       const cached = notesCacheRef.current.get(notebookId);
+      const hadCache = Boolean(cached);
       const now = Date.now();
 
       if (cached && isMountedRef.current) {
         setNotebook(prev => prev ?? cached.notebook);
         setNotes(cached.notes);
         setLoading(false);
+        setHasLoadedOnce(true);
 
         const lastFetchedAt = lastFetchRef.current.get(notebookId) ?? cached.fetchedAt;
         if (!forceNetwork && now - lastFetchedAt < 5000) {
@@ -678,7 +681,8 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
       }
 
       if (isMountedRef.current) {
-        setLoading(true);
+        // 仅在无缓存且从未加载过时才显示整体加载态，避免切换闪烁
+        setLoading(!hadCache && !hasLoadedOnce);
         setError(null);
       }
 
@@ -714,6 +718,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
           setNotebook(notebookPayload);
           setNotes(notesPayload);
           setLoading(false);
+          setHasLoadedOnce(true);
           notesCacheRef.current.set(notebookId, {
             notes: notesPayload,
             notebook: notebookPayload,
@@ -738,7 +743,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
         }
       }
     },
-    [notebookId, normalizeNotes]
+    [notebookId, normalizeNotes, hasLoadedOnce]
   );
 
   useEffect(() => {
@@ -876,7 +881,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
     };
   };
 
-  if (loading) {
+  if (loading && !hasLoadedOnce) {
     return <div className="flex items-center justify-center h-full text-gray-500">Loading notes...</div>;
   }
 
@@ -892,163 +897,162 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
     <div className="pl-2 pr-6 pt-2 pb-12 h-full overflow-y-auto no-scrollbar">
       {/* Header Section */}
       <div className="mb-6">
-        {/* 第一行：笔记本信息和功能按钮 */}
-        <div className="flex items-start justify-between -mb-10">
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-gray-200 shadow-sm w-[260px] min-w-[260px] flex-shrink-0">
-            <div>
-              <div className="text-xs text-gray-500 space-y-1">
-                <div className="whitespace-nowrap">
-                  当前位置：<span className="text-purple-600 font-medium">{notebook.name}</span>
-                </div>
-                <div className="whitespace-nowrap">
-                  创建于：{new Date(notebook.updated_at).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                </div>
-                <div className="whitespace-nowrap">
-                  笔记数：{notebook.note_count} 篇
-                </div>
+        <div className="grid grid-cols-[260px_1fr] gap-4 items-stretch">
+          <div className="flex flex-col justify-center bg-white p-4 rounded-2xl border border-gray-200 shadow-sm w-[260px] min-w-[260px] h-full">
+            <div className="text-xs text-gray-500 space-y-1">
+              <div className="whitespace-nowrap">
+                当前位置：<span className="text-[#0a917a] font-medium">{notebook.name}</span>
+              </div>
+              <div className="whitespace-nowrap">
+                创建于：{new Date(notebook.updated_at).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+              </div>
+              <div className="whitespace-nowrap">
+                笔记数：{notebook.note_count} 篇
               </div>
             </div>
           </div>
           
-          {/* 日期筛选和AI总结按钮 */}
-          <div className="flex items-start gap-3">
-            {/* 日期筛选器 */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500 whitespace-nowrap">时间区间</span>
-              <input
-                type="date"
-                value={dateFilter.startDate}
-                onChange={(e) => setDateFilter(prev => ({ ...prev, startDate: e.target.value }))}
-                className="px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-              />
-              <span className="text-xs text-gray-500">至</span>
-              <input
-                type="date"
-                value={dateFilter.endDate}
-                onChange={(e) => setDateFilter(prev => ({ ...prev, endDate: e.target.value }))}
-                className="px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-              />
+          <div className="flex flex-col gap-3 justify-between h-full">
+            {/* 日期筛选和AI总结按钮 */}
+            <div className="flex items-start justify-end gap-3 flex-wrap">
+              {/* 日期筛选器 */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 whitespace-nowrap">时间区间</span>
+                <input
+                  type="date"
+                  value={dateFilter.startDate}
+                  onChange={(e) => setDateFilter(prev => ({ ...prev, startDate: e.target.value }))}
+                  className="px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#43ccb0]"
+                />
+                <span className="text-xs text-gray-500">至</span>
+                <input
+                  type="date"
+                  value={dateFilter.endDate}
+                  onChange={(e) => setDateFilter(prev => ({ ...prev, endDate: e.target.value }))}
+                  className="px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#43ccb0]"
+                />
+                <button
+                  onClick={() => {
+                    console.log('🔍 执行日期筛选查询:', dateFilter);
+                  }}
+                  className="px-3 py-2 text-xs font-medium text-white bg-[#06c3a8] rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5]"
+                >
+                  查询
+                </button>
+              </div>
+              
+              {/* AI总结按钮 */}
               <button
-                onClick={() => {
-                  console.log('🔍 执行日期筛选查询:', dateFilter);
-                }}
-                className="px-3 py-2 text-xs font-medium text-white bg-[#1a1a1a] rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30"
+                onClick={handleAISummary}
+                disabled={filteredNotes.length === 0}
+                className="px-3 py-2 text-xs font-medium text-white bg-[#06c3a8] rounded-2xl hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
               >
-                查询
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                AI总结和建议
               </button>
             </div>
             
-            {/* AI总结按钮 */}
-            <button
-              onClick={handleAISummary}
-              disabled={filteredNotes.length === 0}
-              className="px-3 py-2 text-xs font-medium text-white bg-[#1a1a1a] rounded-2xl hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-              AI总结和建议
-            </button>
-          </div>
-        </div>
-        
-        {/* 第二行：搜索、筛选、批量操作等按钮 */}
-        <div className="flex items-center justify-end gap-2 flex-wrap mt-4">
-            {/* 搜索框 */}
-            <div className="relative w-48">
-                <input 
-                  type="text" 
-                  placeholder="搜索笔记..." 
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-10 pr-24 px-3 py-2 text-xs font-medium border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500" 
-                />
-                <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                <div className="absolute right-2 top-1/2 -translate-y-1/2">
-                  <div className="relative">
-                    <select
-                      value={searchScope}
-                      onChange={(e) => setSearchScope(e.target.value)}
-                      className="appearance-none bg-transparent text-xs font-medium text-gray-700 rounded-xl py-1 pl-3 pr-6 focus:outline-none cursor-pointer"
-                    >
-                      <option value="all">全部</option>
-                      <option value="title">标题</option>
-                      <option value="content">内容</option>
-                    </select>
-                    <svg className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </div>
+            {/* 搜索、筛选、批量操作等按钮 */}
+            <div className="flex items-center justify-end gap-2 flex-wrap">
+                {/* 搜索框 */}
+                <div className="relative w-48">
+                    <input 
+                      type="text" 
+                      placeholder="搜索笔记..." 
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full pl-10 pr-24 px-3 py-2 text-xs font-medium border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#43ccb0]" 
+                    />
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                      <div className="relative">
+                        <select
+                          value={searchScope}
+                          onChange={(e) => setSearchScope(e.target.value)}
+                          className="appearance-none bg-transparent text-xs font-medium text-gray-700 rounded-xl py-1 pl-3 pr-6 focus:outline-none cursor-pointer"
+                        >
+                          <option value="all">全部</option>
+                          <option value="title">标题</option>
+                          <option value="content">内容</option>
+                        </select>
+                        <svg className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </div>
                 </div>
+                
+                <button 
+                  onClick={handleBatchModeToggle}
+                  className={`px-3 py-2 text-xs font-medium rounded-2xl flex items-center gap-2 whitespace-nowrap ${
+                    batchMode 
+                      ? 'text-white bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5]' 
+                      : 'text-gray-700 bg-white border border-gray-300 hover:bg-[#eef6fd] hover:border-[#b5ece0]'
+                  }`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  {batchMode ? '退出批量' : '批量操作'}
+                </button>
+                {batchMode && selectedNotes.length > 0 && (
+                  <>
+                    <button 
+                      onClick={handleSelectAll}
+                      className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-gray-100 flex items-center gap-2 whitespace-nowrap"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                      </svg>
+                      {selectedNotes.length === notes.length ? '取消全选' : '全选'}
+                    </button>
+                    <button 
+                      onClick={() => setBatchMoveModalOpen(true)}
+                      className="px-3 py-2 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-2xl hover:bg-blue-100 flex items-center gap-2 whitespace-nowrap"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                      </svg>
+                      移动({selectedNotes.length})
+                    </button>
+                    <button 
+                      onClick={() => setBatchDeleteConfirmOpen(true)}
+                      className="px-3 py-2 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-2xl hover:bg-red-100 flex items-center gap-2 whitespace-nowrap"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                      删除({selectedNotes.length})
+                    </button>
+                  </>
+                )}
+                {!batchMode && (
+                  <>
+                    <button onClick={() => navigate('/CreateNote')} className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-[#eef6fd] hover:border-[#b5ece0] flex items-center gap-2 whitespace-nowrap">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                        新建笔记本
+                    </button>
+                    <button onClick={() => {
+                      const isFitnessNotebook = notebook?.name?.toLowerCase().includes('健身') || 
+                                              notebook?.name?.toLowerCase().includes('fitness');
+                      
+                      if (isFitnessNotebook) {
+                        setModalMode('edit');
+                      } else {
+                        setModalMode('create');
+                      }
+                      
+                      setModalOpen(true);
+                    }} className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-[#eef6fd] hover:border-[#b5ece0] flex items-center gap-2 whitespace-nowrap">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                      新建笔记
+                    </button>
+                  </>
+                )}
             </div>
-            
-            <button 
-              onClick={handleBatchModeToggle}
-              className={`px-3 py-2 text-xs font-medium rounded-2xl flex items-center gap-2 whitespace-nowrap ${
-                batchMode 
-                  ? 'text-white bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30' 
-                  : 'text-gray-700 bg-white border border-gray-300 hover:bg-purple-50 hover:border-purple-200'
-              }`}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              {batchMode ? '退出批量' : '批量操作'}
-            </button>
-            {batchMode && selectedNotes.length > 0 && (
-              <>
-                <button 
-                  onClick={handleSelectAll}
-                  className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-gray-100 flex items-center gap-2 whitespace-nowrap"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                  </svg>
-                  {selectedNotes.length === notes.length ? '取消全选' : '全选'}
-                </button>
-                <button 
-                  onClick={() => setBatchMoveModalOpen(true)}
-                  className="px-3 py-2 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-2xl hover:bg-blue-100 flex items-center gap-2 whitespace-nowrap"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                  </svg>
-                  移动({selectedNotes.length})
-                </button>
-                <button 
-                  onClick={() => setBatchDeleteConfirmOpen(true)}
-                  className="px-3 py-2 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-2xl hover:bg-red-100 flex items-center gap-2 whitespace-nowrap"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                  删除({selectedNotes.length})
-                </button>
-              </>
-            )}
-            {!batchMode && (
-              <>
-                <button onClick={() => navigate('/CreateNote')} className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-purple-50 hover:border-purple-200 flex items-center gap-2 whitespace-nowrap">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
-                    新建笔记本
-                </button>
-                <button onClick={() => {
-                  const isFitnessNotebook = notebook?.name?.toLowerCase().includes('健身') || 
-                                          notebook?.name?.toLowerCase().includes('fitness');
-                  
-                  if (isFitnessNotebook) {
-                    setModalMode('edit');
-                  } else {
-                    setModalMode('create');
-                  }
-                  
-                  setModalOpen(true);
-                }} className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-purple-50 hover:border-purple-200 flex items-center gap-2 whitespace-nowrap">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
-                  新建笔记
-                </button>
-              </>
-            )}
+          </div>
         </div>
       </div>
 
@@ -1120,7 +1124,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
       {batchMoveModalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 w-96 max-w-full mx-4">
-            <h2 className="text-xl font-bold mb-4 text-purple-600">移动笔记</h2>
+            <h2 className="text-xl font-bold mb-4 text-[#0a917a]">移动笔记</h2>
             <p className="text-gray-700 mb-4">
               将选中的 {selectedNotes.length} 篇笔记移动到：
             </p>
@@ -1156,7 +1160,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#1a1a1a] rounded-lg hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30"
+                  className="px-4 py-2 text-sm font-medium text-white bg-[#06c3a8] rounded-lg hover:bg-[#04b094] shadow-lg shadow-[#8de2d5]"
                 >
                   确认移动
                 </button>

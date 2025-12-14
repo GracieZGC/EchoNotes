@@ -1,4 +1,5 @@
 import type { ComponentConfig } from './utils/componentSync';
+import type { FieldTemplateField, FieldTemplateSource } from './types/fieldTemplate';
 
 // API客户端配置
 // 兼容多环境：
@@ -56,6 +57,38 @@ export interface ApiResponse<T> {
   message?: string;
   data?: T;
 }
+
+const looksLikeHtml = (text: string) => {
+  const preview = (text || '').trim().slice(0, 300).toLowerCase();
+  return preview.startsWith('<!doctype') || preview.startsWith('<html') || preview.includes('<body');
+};
+
+const buildHttpError = async (response: Response) => {
+  const status = response.status;
+  const statusText = response.statusText || '请求失败';
+  const contentType = response.headers.get('content-type') || '';
+
+  const fallbackMessage = statusText || '未知错误';
+
+  try {
+    if (contentType.includes('application/json')) {
+      const json = await response.json().catch(() => null);
+      const msg =
+        (json && (json.error || json.message)) ||
+        (typeof json === 'string' ? json : null) ||
+        fallbackMessage;
+      return new Error(`请求失败(${status}): ${String(msg)}`);
+    }
+
+    const text = await response.text().catch(() => '');
+    if (!text) return new Error(`请求失败(${status}): ${fallbackMessage}`);
+    if (looksLikeHtml(text)) return new Error(`请求失败(${status}): ${fallbackMessage}`);
+
+    return new Error(`请求失败(${status}): ${text}`);
+  } catch {
+    return new Error(`请求失败(${status}): ${fallbackMessage}`);
+  }
+};
 
 const parseComponentConfig = (value: unknown): ComponentConfig | null => {
   if (!value) return null;
@@ -137,8 +170,7 @@ const getNotebooks = async (): Promise<Notebook[]> => {
     
     // 检查响应状态
     if (!response.ok) {
-      const errorText = await response.text().catch(() => '未知错误');
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
+      throw await buildHttpError(response);
     }
     
     // 尝试解析 JSON
@@ -182,8 +214,8 @@ const getNotebooks = async (): Promise<Notebook[]> => {
     // 处理网络错误
     if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
       const requestUrl = `${API_BASE_URL || window.location.origin}/api/notebooks`;
-      const displayUrl = API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'localhost:3001');
-      throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
+      const backendUrl = API_BASE_URL || 'http://localhost:3001';
+      throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
     }
     
     throw error;
@@ -193,30 +225,48 @@ const getNotebooks = async (): Promise<Notebook[]> => {
 // 获取笔记列表
 const getNotes = async (notebookId: string): Promise<{ notebook: Notebook; notes: Note[] }> => {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/notes?notebook_id=${notebookId}`, { credentials: 'include' });
+    // 添加超时控制（5秒）
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 5000);
     
-    // 检查响应状态
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '未知错误');
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
-    }
-    
-    // 尝试解析 JSON
-    let data;
     try {
-      data = await response.json();
-    } catch (jsonError) {
-      console.error('❌ JSON解析失败:', jsonError);
-      throw new Error('服务器返回了无效的JSON格式');
-    }
-    
-    if (data.success) {
-      return {
-        notebook: data.notebook,
-        notes: data.notes || []
-      };
-    } else {
-      throw new Error(data.message || 'Failed to fetch notes');
+      const response = await fetch(`${API_BASE_URL}/api/notes?notebook_id=${notebookId}`, { 
+        credentials: 'include',
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      // 检查响应状态
+      if (!response.ok) {
+        throw await buildHttpError(response);
+      }
+      
+      // 尝试解析 JSON
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error('❌ JSON解析失败:', jsonError);
+        throw new Error('服务器返回了无效的JSON格式');
+      }
+      
+      if (data.success) {
+        return {
+          notebook: data.notebook,
+          notes: data.notes || []
+        };
+      } else {
+        throw new Error(data.message || 'Failed to fetch notes');
+      }
+    } catch (fetchError: any) {
+      clearTimeout(timeoutId);
+      if (controller.signal.aborted) {
+        throw new Error('请求超时（5秒），后端可能正在处理中，请稍后重试');
+      }
+      throw fetchError;
     }
   } catch (error: any) {
     console.error('❌ Error fetching notes:', error);
@@ -224,8 +274,8 @@ const getNotes = async (notebookId: string): Promise<{ notebook: Notebook; notes
     // 处理网络错误
     if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
       const requestUrl = `${API_BASE_URL || window.location.origin}/api/notes`;
-      const displayUrl = API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'localhost:3001');
-      throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
+      const backendUrl = API_BASE_URL || 'http://localhost:3001';
+      throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
     }
     
     throw error;
@@ -241,6 +291,93 @@ const healthCheck = async (): Promise<boolean> => {
   } catch (error) {
     console.error('Health check failed:', error);
     return false;
+  }
+};
+
+const buildFieldTemplateUrl = (notebookId: string, source: FieldTemplateSource) =>
+  `${API_BASE_URL}/api/notebooks/${notebookId}/field-template?source=${source}`;
+
+export const fetchNotebookFieldTemplate = async (
+  notebookId: string,
+  source: FieldTemplateSource
+): Promise<{ notebook_id: string; source_type: FieldTemplateSource; fields: FieldTemplateField[]; available_fields?: FieldTemplateField[] }> => {
+  if (!notebookId) {
+    throw new Error('请提供 notebookId');
+  }
+  const response = await fetch(buildFieldTemplateUrl(notebookId, source), {
+    credentials: 'include'
+  });
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('字段模板接口未启用（404），请升级后端或稍后再试');
+    throw await buildHttpError(response);
+  }
+  const data = await response.json();
+  if (!data?.success) {
+    throw new Error(data?.error || '获取字段模板失败');
+  }
+  return data.data;
+};
+
+export const saveNotebookFieldTemplate = async (
+  notebookId: string,
+  source: FieldTemplateSource,
+  fields: FieldTemplateField[]
+): Promise<{ notebook_id: string; source_type: FieldTemplateSource; fields: FieldTemplateField[] }> => {
+  if (!notebookId) {
+    throw new Error('请提供 notebookId');
+  }
+  const response = await fetch(`${API_BASE_URL}/api/notebooks/${notebookId}/field-template`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ source, fields }),
+    credentials: 'include'
+  });
+  if (!response.ok) {
+    throw await buildHttpError(response);
+  }
+  const data = await response.json();
+  if (!data?.success) {
+    throw new Error(data?.error || '保存字段模板失败');
+  }
+  return data.data;
+};
+
+export const getLastUsedTemplateNotebook = async (
+  source: FieldTemplateSource
+): Promise<string | null> => {
+  const response = await fetch(`${API_BASE_URL}/api/field-template/last-used?source=${source}`, {
+    credentials: 'include'
+  });
+  if (!response.ok) {
+    throw await buildHttpError(response);
+  }
+  const data = await response.json();
+  if (!data?.success) {
+    throw new Error(data?.error || '获取最近使用记录失败');
+  }
+  return data.data?.notebook_id || null;
+};
+
+export const setLastUsedTemplateNotebook = async (
+  source: FieldTemplateSource,
+  notebookId: string | null
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/api/field-template/last-used`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ source, notebook_id: notebookId }),
+    credentials: 'include'
+  });
+  if (!response.ok) {
+    throw await buildHttpError(response);
+  }
+  const data = await response.json();
+  if (!data?.success) {
+    throw new Error(data?.error || '更新最近使用记录失败');
   }
 };
 
@@ -267,8 +404,7 @@ class ApiClient {
       
       // 检查响应状态
       if (!response.ok) {
-        const errorText = await response.text().catch(() => '未知错误');
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+        throw await buildHttpError(response);
       }
       
       // 尝试解析 JSON
@@ -291,8 +427,8 @@ class ApiClient {
       
       // 处理网络错误
       if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const displayUrl = this.baseURL || (typeof window !== 'undefined' ? window.location.origin : 'localhost:3001');
-        throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
+        const backendUrl = this.baseURL || 'http://localhost:3001';
+        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
       }
       
       // 重新抛出其他错误
@@ -316,8 +452,7 @@ class ApiClient {
       
       // 检查响应状态
       if (!response.ok) {
-        const errorText = await response.text().catch(() => '未知错误');
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+        throw await buildHttpError(response);
       }
       
       // 尝试解析 JSON
@@ -335,8 +470,8 @@ class ApiClient {
       
       // 处理网络错误
       if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const displayUrl = this.baseURL || (typeof window !== 'undefined' ? window.location.origin : 'localhost:3001');
-        throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
+        const backendUrl = this.baseURL || 'http://localhost:3001';
+        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
       }
       
       // 重新抛出其他错误
@@ -360,8 +495,7 @@ class ApiClient {
       
       // 检查响应状态
       if (!response.ok) {
-        const errorText = await response.text().catch(() => '未知错误');
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+        throw await buildHttpError(response);
       }
       
       // 尝试解析 JSON
@@ -423,8 +557,8 @@ class ApiClient {
       
       // 处理网络错误
       if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const displayUrl = this.baseURL || (typeof window !== 'undefined' ? window.location.origin : 'localhost:3001');
-        throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
+        const backendUrl = this.baseURL || 'http://localhost:3001';
+        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
       }
       
       // 重新抛出其他错误
@@ -441,19 +575,96 @@ class ApiClient {
     return getNotes(notebookId);
   }
 
+  async renameNotebook(notebookId: string, name: string, description?: string | null) {
+    if (!notebookId) throw new Error('notebookId is required');
+    if (!name || !name.trim()) throw new Error('请输入新的笔记本名称');
+    const response = await this.post(`/api/notebooks/${notebookId}/rename`, {
+      name,
+      description
+    });
+    const data = response.data;
+    if (!data?.success) {
+      throw new Error(data?.message || data?.error || '重命名笔记本失败');
+    }
+    return data.notebook as Notebook;
+  }
+
+  async deleteNotebook(notebookId: string) {
+    if (!notebookId) throw new Error('notebookId is required');
+    try {
+      const response = await this.delete(`/api/notebooks/${notebookId}`);
+      const data = response.data;
+      if (!data?.success) {
+        throw new Error(data?.message || data?.error || '删除笔记本失败');
+      }
+      return data;
+    } catch (primaryError: any) {
+      // 某些代理或部署不支持 DELETE，尝试兼容 POST 兜底
+      try {
+        const fallback = await this.post('/api/notebooks/delete', { notebook_id: notebookId });
+        const data = fallback.data;
+        if (!data?.success) {
+          throw new Error(data?.message || data?.error || '删除笔记本失败');
+        }
+        return data;
+      } catch (fallbackError: any) {
+        try {
+          const fallbackAlias = await this.post(`/api/notebooks/${notebookId}/delete`);
+          const data = fallbackAlias.data;
+          if (!data?.success) {
+            throw new Error(data?.message || data?.error || '删除笔记本失败');
+          }
+          return data;
+        } catch (aliasError: any) {
+          console.error('❌ 删除笔记本失败 (包含兜底):', { primaryError, fallbackError, aliasError });
+          throw (aliasError || fallbackError || primaryError);
+        }
+      }
+    }
+  }
+
+  async updateNoteComponents(params: {
+    noteId: string;
+    componentInstances: ComponentConfig['componentInstances'];
+    componentData: Record<string, any>;
+    syncToNotebook?: boolean;
+  }) {
+    const { noteId, componentInstances, componentData, syncToNotebook } = params;
+    const response = await fetch(`${API_BASE_URL}/api/notes/${noteId}/components`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        component_instances: componentInstances,
+        component_data: componentData,
+        syncToNotebook: !!syncToNotebook
+      }),
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '未知错误');
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    if (!data?.success) {
+      throw new Error(data?.message || data?.error || '更新笔记组件失败');
+    }
+    return data;
+  }
+
   async healthCheck(): Promise<boolean> {
     return healthCheck();
   }
 
   // 分析相关API
   async analyzeNotes(request: {
-    mode: 'ai' | 'custom';
-    selectedNotes: {
-      notebookId: string;
-      noteIds: string[];
-      dateRange: { from: string; to: string };
-    };
-    config?: any;
+    notebookId: string;
+    notebookType?: string;
+    analysisData: any;
+    mode?: 'ai' | 'custom';
   }): Promise<any> {
     try {
       const response = await fetch(`${API_BASE_URL}/api/analysis`, {
@@ -533,6 +744,178 @@ class ApiClient {
         throw new Error(`无法连接到服务器 (${displayUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 如果使用开发模式，请确保通过 http://localhost:3000 访问\n3. 检查浏览器控制台的网络请求错误详情`);
       }
       
+      throw error;
+    }
+  }
+
+  async getAnalyses(): Promise<any> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analysis`, {
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '未知错误');
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error('❌ JSON解析失败:', jsonError);
+        throw new Error('服务器返回了无效的JSON格式');
+      }
+
+      if (data.success) {
+        return data;
+      } else {
+        throw new Error(data.message || '获取分析列表失败');
+      }
+    } catch (error: any) {
+      console.error('❌ 获取分析列表失败:', error);
+      throw error;
+    }
+  }
+
+  async getAIAnalysisConfig(notebookId: string): Promise<any> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai-analysis-config/${notebookId}`, {
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '未知错误');
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error('❌ JSON解析失败:', jsonError);
+        throw new Error('服务器返回了无效的JSON格式');
+      }
+
+      if (data.success) {
+        return data;
+      } else {
+        throw new Error(data.message || '获取AI分析配置失败');
+      }
+    } catch (error: any) {
+      console.error('❌ 获取AI分析配置失败:', error);
+      throw error;
+    }
+  }
+
+  async saveAIAnalysisConfig(config: {
+    notebook_id: string;
+    notebook_type?: string;
+    chart_config?: any;
+    analysis_components?: string[];
+    custom_prompt?: string;
+  }): Promise<any> {
+    try {
+      // 验证 chart_config 是否存在
+      console.log('📤 [apiClient] 准备发送保存请求:', {
+        notebook_id: config.notebook_id,
+        hasChartConfig: 'chart_config' in config,
+        chartConfig: config.chart_config,
+        chartConfigType: typeof config.chart_config,
+        chartConfigIsUndefined: config.chart_config === undefined,
+        chartConfigIsNull: config.chart_config === null,
+        allKeys: Object.keys(config)
+      });
+      
+      // 确保所有字段都有有效值，避免 undefined 导致 JSON 解析错误
+      // 重要：如果字段是 undefined，JSON.stringify 会直接省略该字段
+      // 但是如果有 undefined 值在对象中，可能导致解析错误
+      const requestBody: any = {
+        notebook_id: config.notebook_id
+      };
+      
+      // 只添加非 undefined 的字段
+      if (config.notebook_type !== undefined) {
+        requestBody.notebook_type = config.notebook_type;
+      }
+      
+      if (config.chart_config !== undefined) {
+        requestBody.chart_config = config.chart_config;
+      }
+      
+      if (config.analysis_components !== undefined && Array.isArray(config.analysis_components)) {
+        requestBody.analysis_components = config.analysis_components;
+      }
+      
+      if (config.custom_prompt !== undefined) {
+        requestBody.custom_prompt = config.custom_prompt;
+      }
+      
+      // 验证 chart_config 是否在 requestBody 中
+      if (config.chart_config !== undefined && !('chart_config' in requestBody)) {
+        console.error('❌ [apiClient] 错误：chart_config 没有添加到 requestBody！', {
+          config,
+          requestBody
+        });
+        // 强制添加
+        requestBody.chart_config = config.chart_config;
+      }
+      
+      // 验证 requestBody 中没有 undefined 值
+      const hasUndefined = Object.values(requestBody).some(v => v === undefined);
+      if (hasUndefined) {
+        console.error('❌ [apiClient] 错误：requestBody 中包含 undefined 值！', {
+          requestBody,
+          keys: Object.keys(requestBody),
+          values: Object.values(requestBody)
+        });
+        // 移除 undefined 值
+        Object.keys(requestBody).forEach(key => {
+          if (requestBody[key] === undefined) {
+            delete requestBody[key];
+          }
+        });
+      }
+      
+      const stringifiedBody = JSON.stringify(requestBody);
+      console.log('📤 [apiClient] 序列化后的请求体:', {
+        hasChartConfig: 'chart_config' in requestBody,
+        chartConfig: requestBody.chart_config,
+        chartConfigType: typeof requestBody.chart_config,
+        stringifiedLength: stringifiedBody.length,
+        stringifiedPreview: stringifiedBody.substring(0, 500),
+        allKeys: Object.keys(requestBody)
+      });
+      
+      const response = await fetch(`${API_BASE_URL}/api/ai-analysis-config`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: stringifiedBody,
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '未知错误');
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error('❌ JSON解析失败:', jsonError);
+        throw new Error('服务器返回了无效的JSON格式');
+      }
+
+      if (data.success) {
+        return data;
+      } else {
+        throw new Error(data.message || '保存AI分析配置失败');
+      }
+    } catch (error: any) {
+      console.error('❌ 保存AI分析配置失败:', error);
       throw error;
     }
   }

@@ -84,7 +84,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
                 type="date"
                 value={filters.dateRange.from}
                 onChange={(e) => updateFilter('dateRange', { ...filters.dateRange, from: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-300"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-[#90e2d0]"
                 placeholder="开始日期"
               />
             </div>
@@ -93,7 +93,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
                 type="date"
                 value={filters.dateRange.to}
                 onChange={(e) => updateFilter('dateRange', { ...filters.dateRange, to: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-300"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-[#90e2d0]"
                 placeholder="结束日期"
               />
             </div>
@@ -110,7 +110,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
                 onClick={() => toggleArrayFilter('status', option.value)}
                 className={`px-3 py-2 text-[10px] rounded-lg border transition-colors ${
                   filters.status.includes(option.value)
-                    ? 'bg-purple-50 text-purple-700 border-purple-200'
+                    ? 'bg-[#eef6fd] text-[#0a6154] border-[#b5ece0]'
                     : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                 }`}
               >
@@ -131,7 +131,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
                   onClick={() => toggleArrayFilter('tags', tag)}
                   className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
                     filters.tags.includes(tag)
-                      ? 'bg-purple-100 text-purple-800 border-purple-300'
+                      ? 'bg-[#d4f3ed] text-[#084338] border-[#90e2d0]'
                       : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                   }`}
                 >
@@ -150,7 +150,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
             value={filters.keywords}
             onChange={(e) => updateFilter('keywords', e.target.value)}
             placeholder="搜索笔记标题或内容..."
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-300"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-[#90e2d0]"
           />
         </div>
 
@@ -161,7 +161,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
             <select
               value={filters.sortBy}
               onChange={(e) => updateFilter('sortBy', e.target.value as 'date' | 'title')}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-300"
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-[#90e2d0]"
             >
               <option value="date">按日期</option>
               <option value="title">按标题</option>
@@ -169,7 +169,7 @@ const AdvancedFilters: React.FC<AdvancedFiltersProps> = ({
             <select
               value={filters.sortOrder}
               onChange={(e) => updateFilter('sortOrder', e.target.value as 'asc' | 'desc')}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-purple-300"
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-0 focus:border-[#90e2d0]"
             >
               <option value="desc">降序</option>
               <option value="asc">升序</option>

@@ -12,9 +12,10 @@ import { getDisplayTitle } from '../utils/displayTitle';
 import { renderRichText } from '../utils/richText';
 import {
   ComponentInstance as TemplateComponentInstance,
-  smartSync
+  smartSync,
+  getComponentConfig
 } from '../utils/componentSync';
-import { getComponentTitle as getDefaultComponentTitle } from '../utils/componentTypes';
+import { getComponentTitle as getDefaultComponentTitle, recordComponentTypes } from '../utils/componentTypes';
 import { formatDateTimeChinese } from '../utils/dateFormatter';
 import { renderContentWithLinks } from '../utils/linkify';
 import ImageViewer from './ImageViewer';
@@ -73,6 +74,13 @@ interface AIAnalysis {
   learningPath: string;
   chatSummary: string;
 }
+
+type ComponentDraft = {
+  id: string;
+  type: string;
+  title: string;
+  value: string;
+};
 
 const safeParseJSON = (value: unknown) => {
   if (typeof value !== 'string') return value;
@@ -233,6 +241,9 @@ const NoteDetailPage: React.FC = () => {
     const params = new URLSearchParams(location.search);
     return params.get('new') === '1';
   });
+  const [editingComponents, setEditingComponents] = useState(false);
+  const [componentDrafts, setComponentDrafts] = useState<ComponentDraft[]>([]);
+  const [savingComponents, setSavingComponents] = useState(false);
 
   const fetchNoteDetail = useCallback(
     async (options: { withSpinner?: boolean } = {}) => {
@@ -550,6 +561,87 @@ const NoteDetailPage: React.FC = () => {
     );
   };
 
+  // 组件编辑草稿初始化
+  useEffect(() => {
+    if (!note) return;
+    const drafts = combinedComponents.map((comp, index) => ({
+      id: comp.id || `component-${index}`,
+      type: comp.type || 'text-short',
+      title: comp.title || getDefaultComponentTitle(comp.type) || '未命名字段',
+      value: comp.content !== undefined && comp.content !== null ? String(comp.content) : ''
+    }));
+    setComponentDrafts(drafts);
+  }, [combinedComponents, note?.note_id]);
+
+  const handleAddDraft = (type: string) => {
+    const id = `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setComponentDrafts((prev) => [
+      ...prev,
+      {
+        id,
+        type,
+        title: getDefaultComponentTitle(type) || '未命名字段',
+        value: ''
+      }
+    ]);
+  };
+
+  const handleDraftChange = (id: string, patch: Partial<ComponentDraft>) => {
+    setComponentDrafts((prev) =>
+      prev.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft))
+    );
+  };
+
+  const handleRemoveDraft = (id: string) => {
+    setComponentDrafts((prev) => prev.filter((draft) => draft.id !== id));
+  };
+
+  const handleCancelEdit = () => {
+    const drafts = combinedComponents.map((comp, index) => ({
+      id: comp.id || `component-${index}`,
+      type: comp.type || 'text-short',
+      title: comp.title || getDefaultComponentTitle(comp.type) || '未命名字段',
+      value: comp.content !== undefined && comp.content !== null ? String(comp.content) : ''
+    }));
+    setComponentDrafts(drafts);
+    setEditingComponents(false);
+  };
+
+  const handleSaveComponents = async () => {
+    if (!note) return;
+    try {
+      setSavingComponents(true);
+      const componentInstances = componentDrafts.map((draft) => ({
+        id: draft.id,
+        type: draft.type,
+        title: draft.title.trim() || getDefaultComponentTitle(draft.type) || '未命名字段',
+        config: getComponentConfig(draft.type)
+      }));
+      const componentData = componentDrafts.reduce<Record<string, any>>((acc, draft) => {
+        acc[draft.id] = {
+          title: draft.title,
+          type: draft.type,
+          value: draft.value
+        };
+        return acc;
+      }, {});
+
+      await apiClient.updateNoteComponents({
+        noteId: note.note_id,
+        componentInstances,
+        componentData,
+        syncToNotebook: true
+      });
+      setEditingComponents(false);
+      await fetchNoteDetail({ withSpinner: false });
+    } catch (err: any) {
+      console.error('❌ 保存组件失败:', err);
+      alert(err?.message || '保存组件失败');
+    } finally {
+      setSavingComponents(false);
+    }
+  };
+
   const handleChatSend = async () => {
     const trimmed = chatInput.trim();
     if (!trimmed || !note) return;
@@ -636,9 +728,9 @@ const NoteDetailPage: React.FC = () => {
   const aiBanner = (() => {
     if (!aiProcessing && !aiProcessingExpired) return null;
     return (
-      <div className="mb-3 flex items-center justify-between rounded-xl border border-dashed border-purple-300 bg-purple-50/80 px-3 py-2 text-xs text-purple-700">
+      <div className="mb-3 flex items-center justify-between rounded-xl border border-dashed border-[#90e2d0] bg-[#eef6fd]/80 px-3 py-2 text-xs text-[#0a6154]">
         <div className="flex items-center gap-2">
-          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-purple-100 text-[11px] font-semibold text-purple-700">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#d4f3ed] text-[11px] font-semibold text-[#0a6154]">
             AI
           </span>
           <span>
@@ -648,8 +740,8 @@ const NoteDetailPage: React.FC = () => {
           </span>
         </div>
         {aiProcessing && (
-          <div className="flex items-center gap-1 text-[11px] text-purple-500">
-            <span className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-purple-500" />
+          <div className="flex items-center gap-1 text-[11px] text-[#0a917a]">
+            <span className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-[#eef6fd]0" />
             正在解析
           </div>
         )}
@@ -692,16 +784,20 @@ const NoteDetailPage: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={handleGenerateAnalysis}
-            className="inline-flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1.5 text-[11px] font-medium text-white shadow-sm hover:bg-slate-800"
-          >
-            <span>AI 总结</span>
-          </button>
-          <button
             onClick={() => setChatOpen(true)}
             className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 shadow-sm hover:bg-slate-50"
           >
             <span>就这条笔记聊聊</span>
+          </button>
+          <button
+            onClick={() => setEditingComponents((prev) => !prev)}
+            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11px] font-medium shadow-sm ${
+              editingComponents
+                ? 'bg-[#06c3a8] text-white hover:bg-[#04b094]'
+                : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            {editingComponents ? '退出编辑' : '编辑组件'}
           </button>
         </div>
       </div>
@@ -728,67 +824,168 @@ const NoteDetailPage: React.FC = () => {
             </div>
           )}
 
-          <div className="space-y-3">
-            {components.map((comp) => {
-              if (!comp.content || !String(comp.content).trim()) return null;
-              const title = comp.title || getDefaultComponentTitle(comp.type);
-              const content = String(comp.content ?? '');
+          {editingComponents ? (
+            <div className="space-y-3 rounded-2xl border border-dashed border-[#90e2d0] bg-[#eef6fd]/70 p-4">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-slate-800">编辑组件内容</div>
+                <div className="text-xs text-slate-500">保存后同步到笔记本模板</div>
+              </div>
+              <div className="space-y-3">
+                {componentDrafts.map((draft) => (
+                  <div
+                    key={draft.id}
+                    className="relative rounded-2xl border border-slate-200 bg-white/90 p-3 shadow-sm"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveDraft(draft.id)}
+                      className="absolute right-5 top-5 z-10 inline-flex h-5 w-5 items-center justify-center text-base text-slate-400 hover:text-slate-600"
+                      title="删除组件"
+                    >
+                      ×
+                    </button>
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+                        <select
+                          value={draft.type}
+                          onChange={(e) => handleDraftChange(draft.id, { type: e.target.value })}
+                          className="w-full md:w-36 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#6bd8c0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
+                        >
+                          {recordComponentTypes.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={draft.title}
+                          onChange={(e) => handleDraftChange(draft.id, { title: e.target.value })}
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#6bd8c0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
+                      placeholder="字段标题"
+                    />
+                  </div>
+                </div>
+                <textarea
+                  value={draft.value}
+                  onChange={(e) => handleDraftChange(draft.id, { value: e.target.value })}
+                  rows={3}
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#6bd8c0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
+                  placeholder="填写组件内容或数据"
+                />
+                <div className="mt-2 flex justify-end gap-2 pr-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCancelEdit()}
+                    className="rounded-md border border-[#b5ece0] px-3 py-1 text-[11px] font-medium text-[#0a917a] hover:border-[#90e2d0] hover:bg-[#eef6fd]"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveComponents}
+                    disabled={savingComponents}
+                    className="rounded-md bg-[#06c3a8] px-3 py-1 text-[11px] font-medium text-white shadow-sm hover:bg-[#04b094] disabled:opacity-60"
+                  >
+                    {savingComponents ? '保存中…' : '保存'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {recordComponentTypes.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => handleAddDraft(opt.id)}
+                    className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:border-[#6bd8c0] hover:text-[#0a917a]"
+                  >
+                    + 添加{opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={savingComponents}
+                  onClick={handleSaveComponents}
+                  className="rounded-lg bg-[#06c3a8] px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-[#04b094] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {savingComponents ? '保存中…' : '保存并同步'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {components.map((comp) => {
+                if (!comp.content || !String(comp.content).trim()) return null;
+                const title = comp.title || getDefaultComponentTitle(comp.type);
+                const content = String(comp.content ?? '');
 
-              if (comp.type === 'image') {
-                const urls = content
-                  .split(/[\n,]/)
-                  .map((u) => u.trim())
-                  .filter(Boolean);
-                if (!urls.length) return null;
+                if (comp.type === 'image') {
+                  const urls = content
+                    .split(/[\n,]/)
+                    .map((u) => u.trim())
+                    .filter(Boolean);
+                  if (!urls.length) return null;
+                  return (
+                    <div
+                      key={comp.id}
+                      className="rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm"
+                    >
+                      <div className="mb-3 flex items-center justify-between">
+                        <span className="inline-flex items-center rounded-full bg-[#06c3a8] px-3 py-1 text-[11px] font-medium text-white">
+                          {title}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {urls.map((url, idx) => (
+                          <button
+                            key={url + idx}
+                            type="button"
+                            onClick={() => handleOpenImages(urls, idx)}
+                            className="relative h-16 w-20 overflow-hidden rounded-lg bg-slate-100"
+                          >
+                            <img
+                              src={url}
+                              alt={title}
+                              className="h-full w-full object-cover"
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+
+                const richRendered = renderRichText(content);
+
                 return (
                   <div
                     key={comp.id}
                     className="rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm"
                   >
-                    <div className="mb-3 flex items-center justify-between">
-                      <span className="inline-flex items-center rounded-full bg-purple-600 px-3 py-1 text-[11px] font-medium text-white">
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex items-center rounded-full bg-[#06c3a8] px-3 py-1 text-[11px] font-medium text-white">
                         {title}
                       </span>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {urls.map((url, idx) => (
-                        <button
-                          key={url + idx}
-                          type="button"
-                          onClick={() => handleOpenImages(urls, idx)}
-                          className="relative h-16 w-20 overflow-hidden rounded-lg bg-slate-100"
-                        >
-                          <img
-                            src={url}
-                            alt={title}
-                            className="h-full w-full object-cover"
-                          />
-                        </button>
-                      ))}
+                    <div className="prose prose-sm mt-3 max-w-none text-[13px] leading-relaxed text-slate-900">
+                      {richRendered}
                     </div>
                   </div>
                 );
-              }
-
-              const richRendered = renderRichText(content);
-
-              return (
-                <div
-                  key={comp.id}
-                  className="rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="inline-flex items-center rounded-full bg-purple-600 px-3 py-1 text-[11px] font-medium text-white">
-                      {title}
-                    </span>
-                  </div>
-                  <div className="prose prose-sm mt-3 max-w-none text-[13px] leading-relaxed text-slate-900">
-                    {richRendered}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+              })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -814,7 +1011,7 @@ const NoteDetailPage: React.FC = () => {
 
             <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3 text-[13px]">
               {chatSummary && (
-                <div className="rounded-xl bg-purple-50/80 p-3 text-xs text-purple-900">
+                <div className="rounded-xl bg-[#eef6fd]/80 p-3 text-xs text-[#062b23]">
                   {chatSummary}
                 </div>
               )}
@@ -828,7 +1025,7 @@ const NoteDetailPage: React.FC = () => {
                   <div
                     className={`max-w-xs rounded-2xl px-4 py-3 ${
                       message.role === 'user'
-                        ? 'bg-slate-900 text-white shadow-lg shadow-purple-500/30'
+                        ? 'bg-slate-900 text-white shadow-lg shadow-[#8de2d5]'
                         : 'bg-slate-100 text-slate-800'
                     }`}
                   >
@@ -846,7 +1043,7 @@ const NoteDetailPage: React.FC = () => {
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleChatSend()}
                   placeholder="输入你的问题，例如：这篇内容的三条核心观点？"
-                  className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-[13px] focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                  className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-[13px] focus:border-[#43ccb0] focus:outline-none focus:ring-1 focus:ring-[#43ccb0]"
                 />
                 <button
                   onClick={handleChatSend}
@@ -873,6 +1070,3 @@ const NoteDetailPage: React.FC = () => {
 };
 
 export default NoteDetailPage;
-
-
-

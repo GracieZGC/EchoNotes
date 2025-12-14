@@ -19,8 +19,12 @@ function truncate(str: string, maxLen: number): string {
   return `${str.slice(0, maxLen)}...`;
 }
 
-export function getDisplayTitle(note: NoteLike, maxLen: number = 20): string {
+export function getDisplayTitle(note: NoteLike | string, maxLen: number = 20): string {
   if (!note) return '';
+  if (typeof note === 'string') {
+    const sentence = extractFirstSentence(note);
+    return truncate(sentence || note, maxLen);
+  }
   
   // 优先查找标题组件
   const titleInstance = (note.component_instances || []).find(ci => {
@@ -82,4 +86,3 @@ export function getDisplayTitle(note: NoteLike, maxLen: number = 20): string {
 
   return truncate(note.title || '', maxLen);
 }
-

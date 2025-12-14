@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import apiClient from '../apiClient'
 import ParseHistoryEditModal from './ParseHistoryEditModal'
 import ImageViewer from './ImageViewer'
+import FieldTemplateModal from './FieldTemplateModal'
+import { useFieldTemplate } from '../hooks/useFieldTemplate'
+import type { FieldTemplatePayload } from '../types/fieldTemplate'
 import { HistoryStatus, normalizeHistoryStatus } from '../utils/parseHistoryStatus'
 
 type NotebookOption = {
@@ -126,6 +129,42 @@ const parseKeywords = (tags?: string | null) => {
     /* ignore parse error */
   }
   return []
+}
+
+const extractNoteTypeFromHistory = (historyLike: any): string | null => {
+  if (!historyLike) return null
+  const direct =
+    typeof historyLike.parsed_note_type === 'string' && historyLike.parsed_note_type.trim()
+      ? historyLike.parsed_note_type.trim()
+      : null
+  if (direct) return direct
+
+  const fallback =
+    typeof historyLike.note_type === 'string' && historyLike.note_type.trim()
+      ? historyLike.note_type.trim()
+      : null
+  if (fallback) return fallback
+
+  const fieldsSource =
+    historyLike.parsed_fields ?? historyLike.parsedFields ?? historyLike.fields ?? null
+  if (!fieldsSource) return null
+
+  try {
+    const parsed =
+      typeof fieldsSource === 'string'
+        ? JSON.parse(fieldsSource)
+        : fieldsSource
+    const noteTypeCandidate =
+      typeof parsed?.note_type === 'string' && parsed.note_type.trim()
+        ? parsed.note_type.trim()
+        : typeof parsed?.noteType === 'string' && parsed.noteType.trim()
+          ? parsed.noteType.trim()
+          : ''
+    return noteTypeCandidate || null
+  } catch (error) {
+    console.warn('⚠️ 无法从 parsed_fields 中解析 note_type:', error)
+    return null
+  }
 }
 
 // 格式化解析的内容，清理JSON格式和转义字符
@@ -588,6 +627,19 @@ export default function AINoteImportPage({
   })
   const [linkPromptDraft, setLinkPromptDraft] = useState(parseSettings.aiSummaryPrompt || DEFAULT_AI_SUMMARY_PROMPT)
   const [textPromptDraft, setTextPromptDraft] = useState(textPrompt)
+  const linkFieldTemplate = useFieldTemplate({
+    source: 'link',
+    notebooks: availableNotebooks
+  })
+  const manualFieldTemplate = useFieldTemplate({
+    source: 'manual',
+    notebooks: availableNotebooks
+  })
+  const attachFieldTemplate = useCallback(
+    (body: Record<string, any>, template: FieldTemplatePayload | null) =>
+      template ? { ...body, fieldTemplate: template } : body,
+    []
+  )
 
   const updateParseSettings = useCallback((updates: Partial<ParseSettings>) => {
     setParseSettings(prev => {
@@ -624,6 +676,7 @@ export default function AINoteImportPage({
       setTextPromptDraft(textPrompt)
     }
   }, [textPrompt, isEditingTextPrompt])
+
 
   const extractImageUrlsFromHtml = useCallback((html: string) => {
     if (!html) return []
@@ -1408,11 +1461,17 @@ export default function AINoteImportPage({
       })
 
       // 调用解析接口（不分配）
-      const apiPromise = apiClient.post('/api/coze/parse-article', {
-        articleUrl: articleUrl.trim(),
-        query: '请提取并整理这篇文章的主要内容，保留关键信息和结构。',
-        aiSummaryConfig: buildLinkAiSummaryPayload()
-      })
+      const apiPromise = apiClient.post(
+        '/api/coze/parse-article',
+        attachFieldTemplate(
+          {
+            articleUrl: articleUrl.trim(),
+            query: '请提取并整理这篇文章的主要内容，保留关键信息和结构。',
+            aiSummaryConfig: buildLinkAiSummaryPayload()
+          },
+          linkFieldTemplate.templatePayload
+        )
+      )
 
       const response = await Promise.race([apiPromise, timeoutPromise]) as any
 
@@ -1543,16 +1602,29 @@ export default function AINoteImportPage({
       })
 
       // 调用解析并分配接口
-      const apiPromise = apiClient.post('/api/coze/parse-and-assign', {
-        articleUrl: articleUrl.trim(),
-        query: '请提取并整理这篇文章的主要内容，保留关键信息和结构。同时根据文章主题推荐一个合适的笔记本分类（如果有）。',
-        aiSummaryConfig: buildLinkAiSummaryPayload()
-      })
+      const apiPromise = apiClient.post(
+        '/api/coze/parse-and-assign',
+        attachFieldTemplate(
+          {
+            articleUrl: articleUrl.trim(),
+            query: '请提取并整理这篇文章的主要内容，保留关键信息和结构。同时根据文章主题推荐一个合适的笔记本分类（如果有）。',
+            aiSummaryConfig: buildLinkAiSummaryPayload()
+          },
+          linkFieldTemplate.templatePayload
+        )
+      )
 
       const response = await Promise.race([apiPromise, timeoutPromise]) as any
 
       if (response.data.success) {
-        const { historyId, assigned, message, metadata: responseMeta } = response.data.data || {}
+        const {
+          historyId,
+          assigned,
+          message,
+          metadata: responseMeta,
+          noteId,
+          suggestedNotebookId: assignedNotebookId
+        } = response.data.data || {}
         setMetadata(responseMeta || null)
         
         if (assigned) {
@@ -1569,6 +1641,20 @@ export default function AINoteImportPage({
         // 刷新解析历史，并跳转到第一页显示最新记录
         setCurrentPage(1)
         await loadHistory()
+        if (noteId) {
+          try {
+            window.dispatchEvent(
+              new CustomEvent('note:created', {
+                detail: { noteId, notebookId: assignedNotebookId || null }
+              })
+            )
+          } catch (eventError) {
+            console.warn('⚠️ 触发 note:created 事件失败:', eventError)
+          }
+        }
+        if (assigned) {
+          onRequestNotebookRefresh?.()
+        }
         
         // 短暂高亮最新条目
         if (historyId) {
@@ -1613,16 +1699,28 @@ export default function AINoteImportPage({
         setTimeout(() => reject(new Error('请求超时，解析可能需要较长时间。请稍后在"解析历史"中查看结果。')), 600000)
       })
 
-      const apiPromise = apiClient.post('/api/parse-and-assign-text', {
-        content: sourceText.trim(),
-        img_urls: pastedImages,
-        aiSummaryConfig: buildTextAiSummaryPayload()
-      })
+      const apiPromise = apiClient.post(
+        '/api/parse-and-assign-text',
+        attachFieldTemplate(
+          {
+            content: sourceText.trim(),
+            img_urls: pastedImages,
+            aiSummaryConfig: buildTextAiSummaryPayload()
+          },
+          manualFieldTemplate.templatePayload
+        )
+      )
 
       const response = await Promise.race([apiPromise, timeoutPromise]) as any
 
       if (response.data.success) {
-        const { historyId, assigned, message } = response.data.data || {}
+        const {
+          historyId,
+          assigned,
+          message,
+          noteId,
+          suggestedNotebookId: assignedNotebookId
+        } = response.data.data || {}
 
         if (assigned) {
           setSuccessMessage(message || '解析成功并已自动分配到笔记本')
@@ -1635,6 +1733,20 @@ export default function AINoteImportPage({
         // 刷新历史记录，并跳转到第一页显示最新记录
         setCurrentPage(1)
         await loadHistory()
+        if (noteId) {
+          try {
+            window.dispatchEvent(
+              new CustomEvent('note:created', {
+                detail: { noteId, notebookId: assignedNotebookId || null }
+              })
+            )
+          } catch (eventError) {
+            console.warn('⚠️ 触发 note:created 事件失败:', eventError)
+          }
+        }
+        if (assigned) {
+          onRequestNotebookRefresh?.()
+        }
         // 短暂高亮最新条目并打开编辑弹窗
         if (historyId) {
           setHighlightedHistoryId(historyId)
@@ -1675,11 +1787,17 @@ export default function AINoteImportPage({
         setTimeout(() => reject(new Error('请求超时，解析可能需要较长时间。请稍后在"解析历史"中查看结果。')), 600000)
       })
 
-      const apiPromise = apiClient.post('/api/parse-text', {
-        content: sourceText.trim(),
-        img_urls: pastedImages,
-        aiSummaryConfig: buildTextAiSummaryPayload()
-      })
+      const apiPromise = apiClient.post(
+        '/api/parse-text',
+        attachFieldTemplate(
+          {
+            content: sourceText.trim(),
+            img_urls: pastedImages,
+            aiSummaryConfig: buildTextAiSummaryPayload()
+          },
+          manualFieldTemplate.templatePayload
+        )
+      )
 
       const response = await Promise.race([apiPromise, timeoutPromise]) as any
 
@@ -1732,14 +1850,20 @@ export default function AINoteImportPage({
     }
 
     try {
-      const response = await apiClient.post('/api/parse-text', {
-        title: draft.title || deriveTitleFromContent(draft.content),
-        content: draft.content.trim(),
-        summary: draft.summary || null,
-        keywords: draft.topics.length > 0 ? draft.topics : null,
-        structuredFields: Object.keys(draft.structuredFields).length > 0 ? draft.structuredFields : null,
-        aiSummaryConfig: buildTextAiSummaryPayload()
-      })
+      const response = await apiClient.post(
+        '/api/parse-text',
+        attachFieldTemplate(
+          {
+            title: draft.title || deriveTitleFromContent(draft.content),
+            content: draft.content.trim(),
+            summary: draft.summary || null,
+            keywords: draft.topics.length > 0 ? draft.topics : null,
+            structuredFields: Object.keys(draft.structuredFields).length > 0 ? draft.structuredFields : null,
+            aiSummaryConfig: buildTextAiSummaryPayload()
+          },
+          manualFieldTemplate.templatePayload
+        )
+      )
 
       if (response.data.success) {
         const historyId = response.data.data?.historyId
@@ -1772,14 +1896,20 @@ export default function AINoteImportPage({
     }
 
     try {
-      const response = await apiClient.post('/api/parse-and-assign-text', {
-        title: draft.title || deriveTitleFromContent(draft.content),
-        content: draft.content.trim(),
-        summary: draft.summary || null,
-        keywords: draft.topics.length > 0 ? draft.topics : null,
-        structuredFields: Object.keys(draft.structuredFields).length > 0 ? draft.structuredFields : null,
-        aiSummaryConfig: buildTextAiSummaryPayload()
-      })
+      const response = await apiClient.post(
+        '/api/parse-and-assign-text',
+        attachFieldTemplate(
+          {
+            title: draft.title || deriveTitleFromContent(draft.content),
+            content: draft.content.trim(),
+            summary: draft.summary || null,
+            keywords: draft.topics.length > 0 ? draft.topics : null,
+            structuredFields: Object.keys(draft.structuredFields).length > 0 ? draft.structuredFields : null,
+            aiSummaryConfig: buildTextAiSummaryPayload()
+          },
+          manualFieldTemplate.templatePayload
+        )
+      )
 
       if (response.data.success) {
         const { historyId, assigned, message, suggestedNotebookName } = response.data.data || {}
@@ -1792,6 +1922,9 @@ export default function AINoteImportPage({
         handleRemoveDraft(draft.id)
         // 刷新历史记录
         await loadHistory()
+        if (assigned) {
+          onRequestNotebookRefresh?.()
+        }
         // 短暂高亮最新条目
         if (historyId) {
           setHighlightedHistoryId(historyId)
@@ -1850,7 +1983,8 @@ export default function AINoteImportPage({
           status: normalizeHistoryStatus(item.status),
           keywords: Array.isArray(item.keywords)
             ? item.keywords
-            : parseKeywords(item.tags)
+            : parseKeywords(item.tags),
+          parsed_note_type: extractNoteTypeFromHistory(item)
         }))
         setHistoryList(mapped)
         setHistoryLoadError(null) // 成功时清除错误
@@ -1910,9 +2044,7 @@ export default function AINoteImportPage({
           parsed_img_urls: historyData.parsed_img_urls !== undefined 
             ? historyData.parsed_img_urls 
             : null,
-          parsed_note_type: historyData.parsed_note_type !== undefined 
-            ? historyData.parsed_note_type 
-            : null
+          parsed_note_type: extractNoteTypeFromHistory(historyData)
         }
         console.log('🔍 映射后的数据:', mapped)
         console.log('🔍 映射后的 parsed_img_urls:', mapped.parsed_img_urls)
@@ -1991,17 +2123,15 @@ export default function AINoteImportPage({
     }
   }
 
-  // AI 分配历史记录
-  const handleAiAssignHistory = async (historyId: string, forceRedistribute = false) => {
+  // AI 分配历史记录（仅允许一次）
+  const handleAiAssignHistory = async (historyId: string) => {
     setAssigningHistoryId(historyId)
     setError(null)
     setSuccessMessage(null)
     try {
-      const response = await apiClient.post(`/api/coze/parse-history/${historyId}/ai-assign`, {
-        forceRedistribute
-      })
+      const response = await apiClient.post(`/api/coze/parse-history/${historyId}/ai-assign`, {})
       const payload = response?.data?.data || {}
-      const message = payload.message || (forceRedistribute ? 'AI重新分配完成' : 'AI分配完成')
+      const message = payload.message || 'AI分配完成'
       setSuccessMessage(message)
       await loadHistory()
       if (payload.createdNotebookId) {
@@ -2131,6 +2261,14 @@ export default function AINoteImportPage({
     setSelectedHistoryIds(new Set())
   }, [historyFilter])
 
+  // 当历史列表变化时，调整页码：如果当前页超出范围，调整到最后一页
+  useEffect(() => {
+    const totalPages = Math.ceil(historyList.length / itemsPerPage)
+    if (totalPages > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages)
+    }
+  }, [historyList, currentPage, itemsPerPage])
+
   const infoMessage = useMemo(() => {
     if (!metadata) return null
     if (metadata.usedFallback) {
@@ -2149,6 +2287,18 @@ export default function AINoteImportPage({
   const isAnyParsing = parseOnlyLoading || parseAssignLoading
   const isCheckingParseOnly = checkingUrl && checkingTarget === 'parseOnly'
   const isCheckingParseAssign = checkingUrl && checkingTarget === 'parseAssign'
+
+  // 解析请求进行中时轮询历史列表，尽早呈现“解析中”记录
+  useEffect(() => {
+    if (!isAnyParsing) return
+
+    loadHistory()
+    const timer = setInterval(() => {
+      loadHistory()
+    }, 3000)
+
+    return () => clearInterval(timer)
+  }, [isAnyParsing, loadHistory])
 
   const renderHistoryContent = () => {
     if (loadingHistory) {
@@ -2208,21 +2358,20 @@ export default function AINoteImportPage({
 
             const statusInfo = statusLabels[displayStatus] || statusLabels['解析中']
             const normalizedHistoryStatus = normalizeHistoryStatus(history.status)
-            const canAiAssign = normalizedHistoryStatus === '解析成功'
-            const shouldShowAiAssign = normalizedHistoryStatus === '解析成功'
+            const hasAssignedNotebook = !!history.assigned_notebook_id
+            const canAiAssign = normalizedHistoryStatus === '解析成功' && !hasAssignedNotebook
+            const shouldShowAiAssign = canAiAssign
             const aiAssignDisabledReason =
-              normalizedHistoryStatus !== '解析成功' ? '解析成功后才能使用AI分配' : ''
+              normalizedHistoryStatus !== '解析成功'
+                ? '解析成功后才能使用AI分配'
+                : hasAssignedNotebook
+                  ? 'AI 已完成分配，无法再次触发'
+                  : ''
             const isAssigningCurrent = assigningHistoryId === history.id
             const aiAssignButtonClass = canAiAssign
-              ? 'px-3 py-1.5 text-xs border border-purple-200 text-purple-600 rounded hover:bg-purple-50 transition-colors'
+              ? 'px-3 py-1.5 text-xs border border-[#b5ece0] text-[#0a917a] rounded hover:bg-[#eef6fd] transition-colors'
               : 'px-3 py-1.5 text-xs border border-slate-200 text-slate-400 rounded bg-slate-50 cursor-not-allowed'
-            const aiAssignLabel = isAssigningCurrent
-              ? history.assigned_notebook_id
-                ? 'AI重新分配中…'
-                : 'AI分配中…'
-              : history.assigned_notebook_id
-                ? 'AI重新分配'
-                : 'AI分配'
+            const aiAssignLabel = isAssigningCurrent ? 'AI分配中…' : 'AI分配'
             const keywords = Array.isArray(history.keywords) ? history.keywords : []
 
             const isLatest = latestHistory && history.id === latestHistory.id
@@ -2235,7 +2384,6 @@ export default function AINoteImportPage({
             const sourceLabel = normalizedSourceType === 'from_url' ? '链接解析' : '文本解析'
             const sourceColor = normalizedSourceType === 'from_url' ? 'bg-indigo-100 text-indigo-700' : 'bg-blue-100 text-blue-700'
 
-            const hasAssignedNotebook = !!history.assigned_notebook_id
             const hasSuggestedNotebook = !!history.suggested_notebook_name
             let assignmentStatus: '已分配' | '未分配' | '分配失败' = '未分配'
             let assignmentStatusColor = 'bg-gray-100 text-gray-700'
@@ -2253,13 +2401,13 @@ export default function AINoteImportPage({
             return (
               <div
                 key={history.id}
-                className={`border rounded-lg p-4 transition-all duration-300 ${
+                className={`border rounded-lg p-3 transition-all duration-300 ${
                   isHighlighted
-                    ? 'border-purple-400 bg-white shadow-sm ring-1 ring-purple-200'
+                    ? 'border-[#6bd8c0] bg-white shadow-sm ring-1 ring-[#b5ece0]'
                     : isLatest
-                      ? 'border-purple-300 bg-white/90'
+                      ? 'border-[#90e2d0] bg-white/90'
                       : selectedHistoryIds.has(history.id)
-                        ? 'border-purple-300 bg-white'
+                        ? 'border-[#90e2d0] bg-white'
                         : 'border-[#e0d7fb] bg-white/80 hover:bg-white'
                 }`}
               >
@@ -2272,41 +2420,51 @@ export default function AINoteImportPage({
                       className="mt-1 w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"
                     />
                       <div className="flex-1 min-w-0">
-                        {/* 标签行 */}
-                        <div className="flex items-center gap-2 mb-2 flex-wrap">
-                          <span className={`px-2 py-1 text-xs rounded whitespace-nowrap ${sourceColor}`}>
-                            {sourceLabel}
-                          </span>
-                          {isLatest && (
-                            <span className="px-2 py-1 text-xs rounded whitespace-nowrap bg-purple-200 text-purple-800 font-medium">
-                              最新
-                            </span>
-                          )}
-                          <span className={`px-2 py-1 text-xs rounded whitespace-nowrap ${statusInfo.className}`}>
-                            {statusInfo.label}
-                          </span>
-                          <span className={`px-2 py-1 text-xs rounded whitespace-nowrap ${assignmentStatusColor}`}>
-                            {assignmentStatus}
-                          </span>
-                        </div>
-
                         {/* 标题 */}
                         {formattedTitle && (
-                          <div className="text-sm font-semibold text-slate-900 mb-2">
+                          <div className="text-[13px] font-semibold text-slate-900 mb-2">
                             {formattedTitle}
                           </div>
                         )}
 
-                        {/* 已分配到 */}
-                        {history.assigned_notebook_name && (
-                          <div className="text-sm text-slate-600 mb-1">
-                            <span className="font-medium">已分配到:</span>{' '}
-                            <span className="text-indigo-600">{history.assigned_notebook_name}</span>
+                        {/* 标签行：移到标题下面一行 */}
+                        <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+                          <span className={`px-1.5 py-0.5 text-[11px] rounded whitespace-nowrap ${sourceColor}`}>
+                            {sourceLabel}
+                          </span>
+                          {isLatest && (
+                            <span className="px-1.5 py-0.5 text-[11px] rounded whitespace-nowrap bg-[#b5ece0] text-[#084338] font-medium">
+                              最新
+                            </span>
+                          )}
+                          <span className={`px-1.5 py-0.5 text-[11px] rounded whitespace-nowrap ${statusInfo.className}`}>
+                            {statusInfo.label}
+                          </span>
+                          <span className={`px-1.5 py-0.5 text-[11px] rounded whitespace-nowrap ${assignmentStatusColor}`}>
+                            {assignmentStatus}
+                          </span>
+                        </div>
+
+                        {/* 笔记分类 + 已分配到 */}
+                        {(history.parsed_note_type || history.assigned_notebook_name) && (
+                          <div className="text-[12px] text-slate-600 mb-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+                            {history.parsed_note_type && (
+                              <span className="flex items-center gap-1">
+                                <span className="font-medium">AI分类:</span>
+                                <span className="text-indigo-600">{history.parsed_note_type}</span>
+                              </span>
+                            )}
+                            {history.assigned_notebook_name && (
+                              <span className="flex items-center gap-1">
+                                <span className="font-medium">已分配到:</span>
+                                <span className="text-indigo-600">{history.assigned_notebook_name}</span>
+                              </span>
+                            )}
                           </div>
                         )}
 
                         {/* 解析时间 */}
-                        <div className="text-xs text-slate-500">
+                        <div className="text-[11px] text-slate-500">
                           解析时间：{new Date(history.parsed_at).toLocaleString('zh-CN')}
                         </div>
                     </div>
@@ -2315,10 +2473,7 @@ export default function AINoteImportPage({
                       <div className="flex items-center gap-2 flex-shrink-0">
                     {shouldShowAiAssign && (
                         <button
-                        onClick={() =>
-                          canAiAssign &&
-                          handleAiAssignHistory(history.id, !!history.assigned_notebook_id)
-                        }
+                        onClick={() => canAiAssign && handleAiAssignHistory(history.id)}
                         className={aiAssignButtonClass}
                         disabled={!canAiAssign || isAssigningCurrent}
                         title={
@@ -2385,7 +2540,7 @@ export default function AINoteImportPage({
                         onClick={() => setCurrentPage(page)}
                         className={`px-3 py-1.5 text-sm border rounded-lg transition-colors ${
                           currentPage === page
-                            ? 'bg-[#1a1a1a] text-white shadow-lg shadow-purple-500/30 border-purple-600'
+                            ? 'bg-[#06c3a8] text-white shadow-lg shadow-[#8de2d5] border-[#06c3a8]'
                             : 'border-slate-200 text-slate-600 hover:bg-slate-50'
                         }`}
                       >
@@ -2417,11 +2572,11 @@ export default function AINoteImportPage({
   }
 
   return (
-    <div className="flex flex-col gap-6 bg-purple-50 min-h-screen px-4 pb-8">
+    <div className="flex flex-col gap-6 bg-[#eef6fd] min-h-screen px-4 pb-8">
       <div className="space-y-4">
         {/* 文章链接输入区域 */}
         <div className="space-y-3">
-          <div className="inline-flex items-center gap-2 rounded-xl bg-[#1a1a1a] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-purple-500/30">
+          <div className="inline-flex items-center gap-2 rounded-xl bg-[#06c3a8] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-[#8de2d5]">
             <span className="text-sm">🔗</span>
             <span>方式一 · 解析链接</span>
           </div>
@@ -2446,7 +2601,7 @@ export default function AINoteImportPage({
               className={`flex-1 rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 ${
                 urlExists
                   ? 'border-red-300 focus:border-red-500 focus:ring-red-200'
-                  : 'border-slate-200 focus:border-purple-500 focus:ring-purple-200'
+                  : 'border-slate-200 focus:border-[#43ccb0] focus:ring-[#b5ece0]'
               } bg-white`}
               disabled={isAnyParsing || loading}
               onKeyPress={e => {
@@ -2464,7 +2619,7 @@ export default function AINoteImportPage({
                 urlExists ||
                 isCheckingParseOnly
               }
-              className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 disabled:cursor-not-allowed disabled:bg-purple-300"
+              className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:cursor-not-allowed disabled:bg-[#90e2d0]"
               title="仅解析文章内容，生成解析历史并在编辑弹窗中打开，不自动分配"
             >
               {isCheckingParseOnly
@@ -2484,7 +2639,7 @@ export default function AINoteImportPage({
                 urlExists ||
                 isCheckingParseAssign
               }
-              className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 disabled:cursor-not-allowed disabled:bg-purple-300"
+              className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:cursor-not-allowed disabled:bg-[#90e2d0]"
               title="解析文章内容并自动分配到推荐的笔记本"
             >
               {isCheckingParseAssign
@@ -2499,6 +2654,24 @@ export default function AINoteImportPage({
           <p className="text-xs text-slate-500">
             支持微信公众号/长桥/知乎等链接，点击“仅解析”生成历史，或点击“解析并分配”自动归类推荐笔记本。
           </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <button
+              type="button"
+              onClick={() => availableNotebooks.length && linkFieldTemplate.openModal()}
+              disabled={!availableNotebooks.length || linkFieldTemplate.loading || !linkFieldTemplate.initialized}
+              className="rounded-full border border-[#b5ece0] px-3 py-1 text-[12px] font-medium text-[#0a6154] bg-white hover:bg-[#eef6fd] disabled:cursor-not-allowed disabled:text-slate-400 disabled:border-slate-200"
+            >
+              字段模板
+            </button>
+            <span className="text-[11px] text-slate-500">
+              {linkFieldTemplate.currentNotebook?.name
+                ? `用了此配置的笔记本：${linkFieldTemplate.currentNotebook.name}`
+                : '使用默认字段模板'}
+            </span>
+          </div>
+          {linkFieldTemplate.error && (
+            <div className="text-[11px] text-rose-500">{linkFieldTemplate.error}</div>
+          )}
           {urlExists && existingHistoryId && (
             <p className="mt-1 text-xs text-red-500">
               该链接已解析过，历史ID: {existingHistoryId}
@@ -2555,7 +2728,7 @@ export default function AINoteImportPage({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                      className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
                       onClick={() => {
                         const nextPrompt = linkPromptDraft.trim() || DEFAULT_AI_SUMMARY_PROMPT
                         updateParseSettings({ aiSummaryPrompt: nextPrompt })
@@ -2581,7 +2754,7 @@ export default function AINoteImportPage({
                   <div className="whitespace-pre-line">{parseSettings.aiSummaryPrompt || DEFAULT_AI_SUMMARY_PROMPT}</div>
                   <button
                     type="button"
-                    className="rounded-lg border border-purple-200 px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-50 transition-colors"
+                    className="rounded-lg border border-[#b5ece0] px-3 py-1.5 text-xs font-medium text-[#0a6154] hover:bg-[#eef6fd] transition-colors"
                     onClick={() => {
                       setLinkPromptDraft(parseSettings.aiSummaryPrompt || DEFAULT_AI_SUMMARY_PROMPT)
                       setIsEditingLinkPrompt(true)
@@ -2596,13 +2769,13 @@ export default function AINoteImportPage({
         </div>
 
         <div className="space-y-3">
-          <div className="inline-flex items-center gap-2 rounded-xl bg-[#1a1a1a] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-purple-500/30">
+          <div className="inline-flex items-center gap-2 rounded-xl bg-[#06c3a8] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-[#8de2d5]">
             <span className="text-sm">✏️</span>
             <span>方式二 · 键入笔记</span>
           </div>
           <textarea
             ref={sourceTextareaRef}
-            className="w-full h-52 resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-relaxed focus:outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-200"
+            className="w-full h-52 resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-relaxed focus:outline-none focus:border-[#43ccb0] focus:ring-2 focus:ring-[#b5ece0]"
             placeholder="将原始笔记、会议记录或碎片化想法粘贴在这里..."
             value={sourceText}
             onChange={e => {
@@ -2691,7 +2864,7 @@ export default function AINoteImportPage({
               {isEditingTextPrompt ? (
                 <>
                   <textarea
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 focus:border-purple-500 focus:ring-2 focus:ring-purple-200"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 focus:border-[#43ccb0] focus:ring-2 focus:ring-[#b5ece0]"
                     rows={3}
                     value={textPromptDraft}
                     onChange={(e) => setTextPromptDraft(e.target.value)}
@@ -2699,7 +2872,7 @@ export default function AINoteImportPage({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                      className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
                       onClick={() => {
                         const nextPrompt = textPromptDraft.trim() || DEFAULT_AI_SUMMARY_PROMPT
                         setTextPrompt(nextPrompt)
@@ -2730,7 +2903,7 @@ export default function AINoteImportPage({
                   <div className="whitespace-pre-line">{textPrompt || DEFAULT_AI_SUMMARY_PROMPT}</div>
                   <button
                     type="button"
-                    className="rounded-lg border border-purple-200 px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-50 transition-colors"
+                    className="rounded-lg border border-[#b5ece0] px-3 py-1.5 text-xs font-medium text-[#0a6154] hover:bg-[#eef6fd] transition-colors"
                     onClick={() => {
                       setTextPromptDraft(textPrompt || DEFAULT_AI_SUMMARY_PROMPT)
                       setIsEditingTextPrompt(true)
@@ -2742,18 +2915,36 @@ export default function AINoteImportPage({
               )}
             </div>
           )}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <button
+              type="button"
+              onClick={() => availableNotebooks.length && manualFieldTemplate.openModal()}
+              disabled={!availableNotebooks.length || manualFieldTemplate.loading || !manualFieldTemplate.initialized}
+              className="rounded-full border border-[#b5ece0] px-3 py-1 text-[12px] font-medium text-[#0a6154] bg-white hover:bg-[#eef6fd] disabled:cursor-not-allowed disabled:text-slate-400 disabled:border-slate-200"
+            >
+              字段模板
+            </button>
+            <span className="text-[11px] text-slate-500">
+              {manualFieldTemplate.currentNotebook?.name
+                ? `用了此配置的笔记本：${manualFieldTemplate.currentNotebook.name}`
+                : '使用默认字段模板'}
+            </span>
+          </div>
+          {manualFieldTemplate.error && (
+            <div className="text-[11px] text-rose-500">{manualFieldTemplate.error}</div>
+          )}
             <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 onClick={handleAIAssignAndSaveFromText}
                 disabled={!sourceText.trim() || loading}
-                className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 disabled:cursor-not-allowed disabled:bg-purple-300"
+                className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:cursor-not-allowed disabled:bg-[#90e2d0]"
               >
                 {loading ? '处理中…' : '仅解析'}
               </button>
               <button
                 onClick={handleSaveManualToHistoryFromText}
                 disabled={!sourceText.trim() || loading}
-                className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 disabled:cursor-not-allowed disabled:bg-purple-300"
+                className="rounded-xl px-4 py-2 text-sm font-medium text-white transition-colors bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:cursor-not-allowed disabled:bg-[#90e2d0]"
               >
                 {loading ? '保存中…' : '解析并分配'}
               </button>
@@ -2770,7 +2961,7 @@ export default function AINoteImportPage({
       {/* 解析历史区域 */}
       <div className="space-y-4">
         {/* 解析历史标题框 */}
-        <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-[#1a1a1a] text-white shadow-lg shadow-purple-500/30">
+        <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-[#06c3a8] text-white shadow-lg shadow-[#8de2d5]">
           <h2 className="text-base font-semibold">
             解析历史
           </h2>
@@ -2848,6 +3039,40 @@ export default function AINoteImportPage({
         </div>
       </div>
 
+      {/* 字段模板弹窗 */}
+      <FieldTemplateModal
+        isOpen={linkFieldTemplate.isModalOpen}
+        sourceType="link"
+        notebookName={linkFieldTemplate.currentNotebook?.name || null}
+        fields={linkFieldTemplate.modalFields}
+        loading={!linkFieldTemplate.initialized || linkFieldTemplate.loading}
+        saving={linkFieldTemplate.saving}
+        error={linkFieldTemplate.error}
+        hasChanges={linkFieldTemplate.hasUnsavedChanges}
+        onClose={linkFieldTemplate.closeModal}
+        onToggleField={linkFieldTemplate.toggleField}
+        onSelectAll={linkFieldTemplate.selectAllFields}
+        onClearAll={linkFieldTemplate.clearAllFields}
+        onReset={linkFieldTemplate.resetDraftFields}
+        onSave={linkFieldTemplate.saveTemplate}
+      />
+      <FieldTemplateModal
+        isOpen={manualFieldTemplate.isModalOpen}
+        sourceType="manual"
+        notebookName={manualFieldTemplate.currentNotebook?.name || null}
+        fields={manualFieldTemplate.modalFields}
+        loading={!manualFieldTemplate.initialized || manualFieldTemplate.loading}
+        saving={manualFieldTemplate.saving}
+        error={manualFieldTemplate.error}
+        hasChanges={manualFieldTemplate.hasUnsavedChanges}
+        onClose={manualFieldTemplate.closeModal}
+        onToggleField={manualFieldTemplate.toggleField}
+        onSelectAll={manualFieldTemplate.selectAllFields}
+        onClearAll={manualFieldTemplate.clearAllFields}
+        onReset={manualFieldTemplate.resetDraftFields}
+        onSave={manualFieldTemplate.saveTemplate}
+      />
+
       {/* 手动移动笔记弹窗 */}
       {manualMoveHistory && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-4">
@@ -2869,7 +3094,7 @@ export default function AINoteImportPage({
                     setManualMoveNotebookId(e.target.value)
                     if (manualMoveError) setManualMoveError(null)
                   }}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                   disabled={manualMoveLoading}
                 >
                   <option value="">请选择笔记本</option>
@@ -2967,7 +3192,7 @@ export default function AINoteImportPage({
                 <div key={draft.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
-                      <span className="rounded-full bg-purple-100 px-2.5 py-1 text-xs text-purple-700">
+                      <span className="rounded-full bg-[#d4f3ed] px-2.5 py-1 text-xs text-[#0a6154]">
                         置信度 {confidencePercent}（{confidenceLabel(draft.confidence)}）
                       </span>
                       {draft.explanation && (
@@ -2993,7 +3218,7 @@ export default function AINoteImportPage({
                           </button>
                           <button
                             onClick={() => handleAIAssignAndSave(draft)}
-                            className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#1a1a1a] hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+                            className="rounded-lg px-3 py-1.5 text-xs font-medium text-white bg-[#06c3a8] hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
                             title="保存到历史并让AI自动分配笔记本"
                           >
                             AI分配并保存
@@ -3026,7 +3251,7 @@ export default function AINoteImportPage({
                         type="text"
                         value={draft.title}
                         onChange={e => updateDraft(draft.id, d => ({ ...d, title: e.target.value }))}
-                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                         placeholder="AI 生成的标题，可自行修改"
                       />
                     </div>
@@ -3036,7 +3261,7 @@ export default function AINoteImportPage({
                       <select
                         value={draft.targetNotebookId || ''}
                         onChange={e => handleNotebookChange(draft.id, e.target.value)}
-                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                       >
                         <option value="">请选择笔记本</option>
                         {renderedNotebooks.map(notebook => (
@@ -3085,7 +3310,7 @@ export default function AINoteImportPage({
                         value={draft.summary}
                         onChange={e => updateDraft(draft.id, d => ({ ...d, summary: e.target.value }))}
                         rows={3}
-                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                         placeholder="一句话总结可用于后续检索"
                       />
                     </div>
@@ -3113,7 +3338,7 @@ export default function AINoteImportPage({
                       value={draft.content}
                       onChange={e => updateDraft(draft.id, d => ({ ...d, content: e.target.value }))}
                       rows={8}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed focus:border-[#43ccb0] focus:outline-none focus:ring-2 focus:ring-[#b5ece0]"
                     />
                   </div>
                 </div>

@@ -1,0 +1,63 @@
+# “仅解析”与“解析并分配”功能现有逻辑说明
+
+## 关键发现
+
+后端路由文件 `backend/src/routes/parse.js` **并没有使用** `backend/src/lib/coze-workflow.js` 文件。它内部直接用 `axios` 重复实现了一套自己的 Coze API 调用逻辑。**这就是为什么之前所有的代码修改都无效的原因**。
+
+## 核心流程概览
+
+无论是点击“仅解析”还是“解析并分配”，整体流程都遵循以下步骤：
+
+1.  **前端触发**：用户在 `AINoteImportPage.tsx` 组件中点击按钮。
+2.  **前端API调用**：组件的事件处理器 (`handleParseOnly` 或 `handleParseAndAssign`) 通过 `apiClient.ts` 向后端发起一个 POST 请求。
+3.  **后端处理**：`backend/src/routes/parse.js` 中对应的路由接收请求，**直接调用 `axios` 与 Coze API 通信**，然后将结果存入数据库。
+4.  **后端返回**：后端将新创建的数据库记录 `historyId` 返回给前端。
+5.  **前端获取详情**：前端收到 `historyId` 后，立即发起另一个 GET 请求，获取该 `historyId` 对应的完整解析数据。
+6.  **弹窗显示**：获取到完整数据后，将其设置到一个名为 `editingHistory` 的状态中，这会触发 `ParseHistoryEditModal.tsx` 弹窗显示，并将数据填充到弹窗的各个组件里。
+
+---
+
+## 详细逻辑分解
+
+### 1. "仅解析" 按钮
+
+*   **前端组件**: `AINoteImportPage.tsx`
+*   **点击事件**: `onClick={handleParseOnly}`
+*   **核心动作**:
+    1.  调用 `apiClient.post('/api/coze/parse-article', ...)`。
+    2.  请求体中包含 `articleUrl` 和一个固定的 `query`："请提取并整理这篇文章的主要内容，保留关键信息和结构。"
+
+*   **后端路由**: `/api/coze/parse-article` (位于 `backend/src/routes/parse.js`)
+*   **核心动作**:
+    1.  从 `process.env` 读取 `COZE_ACCESS_TOKEN` 和 `COZE_WORKFLOW_ID`。
+    2.  **在路由文件内部，直接使用 `axios.post` 调用 Coze Workflow API**。
+    3.  对 Coze 返回的结果进行清洗和规范化（例如，从返回的文本或JSON中提取 `title`, `content`, `author` 等字段）。
+    4.  将提取出的所有字段（`parsedFields`）、原始响应等信息存入数据库的 `article_parse_history` 表，生成一条新记录，并获得 `historyId`。
+    5.  将 `historyId` 和解析出的主要字段返回给前端。
+
+*   **结果映射到弹窗**:
+    1.  前端的 `handleParseOnly` 收到包含 `historyId` 的成功响应。
+    2.  调用 `handleEditHistory(historyId)` 函数。
+    3.  该函数向后端 `/api/coze/parse-history/:id` 发起 GET 请求，获取刚刚存入的完整历史记录。
+    4.  将返回的记录对象（包含 `parsed_title`, `parsed_content`, `parsed_summary`, `keywords` 等所有数据库字段）设置到 `editingHistory` 状态。
+    5.  `ParseHistoryEditModal` 弹窗因 `editingHistory` 状态更新而显示，并将这个对象的数据填充到对应的输入框和文本区域中。
+
+### 2. "解析并分配" 按钮
+
+此流程与“仅解析”非常相似，主要区别在于后端的业务逻辑：
+
+*   **前端组件**: `AINoteImportPage.tsx`
+*   **点击事件**: `onClick={handleParseAndAssign}`
+*   **核心动作**:
+    1.  调用 `apiClient.post('/api/coze/parse-and-assign', ...)`。
+    2.  `query` 稍有不同，额外要求 Coze "同时根据文章主题推荐一个合适的笔记本分类"。
+
+*   **后端路由**: `/api/coze/parse-and-assign` (位于 `backend/src/routes/parse.js`)
+*   **核心动作**:
+    1.  **同样在路由文件内部，直接使用 `axios.post` 调用 Coze Workflow API**。
+    2.  获取到 Coze 的响应后，除了执行与“仅解析”相同的字段提取和规范化操作外，它还会额外处理 Coze 可能返回的 `suggestedNotebookName`（推荐的笔记本名称）。
+    3.  **在存入数据库时，它会将 `suggested_notebook_id` 和 `assigned_notebook_id` 一起赋值**，实现“自动分配”的逻辑。
+    4.  将 `historyId` 和分配结果（是否成功分配、推荐的笔记本名称等）返回给前端。
+
+*   **结果映射到弹窗**:
+    *   与“仅解析”的流程**完全相同**。前端收到 `historyId` 后，也是通过 `handleEditHistory` 获取完整数据，并最终在 `ParseHistoryEditModal` 弹窗中展示所有解析出的字段。

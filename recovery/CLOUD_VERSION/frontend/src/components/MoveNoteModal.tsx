@@ -35,7 +35,7 @@ const MoveNoteModal: React.FC<MoveNoteModalProps> = ({
       <div 
         className="bg-white rounded-lg p-6 w-96 max-w-full mx-4"
         onClick={(e) => {
-          e.preventDefault();
+          // 避免冒泡到遮罩层关闭对话框，同时不阻止表单/选择框的默认行为
           e.stopPropagation();
         }}
       >
@@ -48,16 +48,8 @@ const MoveNoteModal: React.FC<MoveNoteModalProps> = ({
             </label>
             <select
               name="notebookId"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#43ccb0]"
               required
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
             >
               <option value="">请选择笔记本</option>
               {notebooks
@@ -81,7 +73,7 @@ const MoveNoteModal: React.FC<MoveNoteModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-[#1a1a1a] text-white rounded-md hover:bg-[#2b2b2b] shadow-lg shadow-purple-500/30 transition-colors"
+              className="px-4 py-2 bg-[#06c3a8] text-white rounded-md hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] transition-colors"
             >
               移动
             </button>
@@ -93,4 +85,3 @@ const MoveNoteModal: React.FC<MoveNoteModalProps> = ({
 };
 
 export default MoveNoteModal;
-

@@ -101,14 +101,14 @@ const SortableCard: React.FC<{
     <div
       ref={setNodeRef}
       style={style}
-      className={`bg-white border border-purple-200 rounded-2xl p-4 shadow-sm ${
-        isDragging ? 'ring-2 ring-purple-400' : 'hover:border-purple-300'
+      className={`bg-white border border-[#b5ece0] rounded-2xl p-4 shadow-sm ${
+        isDragging ? 'ring-2 ring-[#6bd8c0]' : 'hover:border-[#90e2d0]'
       } transition-colors`}
     >
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <button
-            className="inline-flex items-center justify-center rounded-full border border-purple-200 bg-purple-50 px-2 py-1 text-[12px] text-purple-500 hover:border-purple-400 hover:text-purple-700 flex-shrink-0"
+            className="inline-flex items-center justify-center rounded-full border border-[#b5ece0] bg-[#eef6fd] px-2 py-1 text-[12px] text-[#0a917a] hover:border-[#6bd8c0] hover:text-[#0a6154] flex-shrink-0"
             {...attributes}
             {...listeners}
             type="button"
@@ -120,7 +120,7 @@ const SortableCard: React.FC<{
                 type="text"
                 value={draftTitle}
                 onChange={(e) => onDraftTitleChange(e.target.value)}
-                className="flex-1 px-3 py-2 border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-[12px]"
+                className="flex-1 px-3 py-2 border border-[#90e2d0] rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none text-[12px]"
                 placeholder="字段标题"
               />
           ) : (
@@ -134,21 +134,21 @@ const SortableCard: React.FC<{
             <>
               <button
                 type="button"
-                className="inline-flex items-center rounded-full bg-purple-600 px-3 py-1 text-[12px] font-medium text-white"
+                className="inline-flex items-center rounded-full bg-[#06c3a8] px-3 py-1 text-[12px] font-medium text-white"
                 onClick={onSaveEdit}
               >
                 保存
               </button>
               <button
                 type="button"
-                className="inline-flex items-center rounded-full bg-purple-100 px-3 py-1 text-[12px] font-medium text-purple-700"
+                className="inline-flex items-center rounded-full bg-[#d4f3ed] px-3 py-1 text-[12px] font-medium text-[#0a6154]"
                 onClick={onCancelEdit}
               >
                 取消
               </button>
               <button
                 type="button"
-                className="inline-flex items-center rounded-full bg-purple-100 px-3 py-1 text-[12px] font-medium text-purple-700"
+                className="inline-flex items-center rounded-full bg-[#d4f3ed] px-3 py-1 text-[12px] font-medium text-[#0a6154]"
                 onClick={onDelete}
               >
                 删除
@@ -158,14 +158,14 @@ const SortableCard: React.FC<{
             <>
               <button
                 type="button"
-                className="inline-flex items-center rounded-full bg-purple-100 px-3 py-1 text-[12px] font-medium text-purple-700"
+                className="inline-flex items-center rounded-full bg-[#d4f3ed] px-3 py-1 text-[12px] font-medium text-[#0a6154]"
                 onClick={onStartEdit}
               >
                 编辑
               </button>
               <button
                 type="button"
-                className="inline-flex items-center rounded-full bg-purple-100 px-3 py-1 text-[12px] font-medium text-purple-700"
+                className="inline-flex items-center rounded-full bg-[#d4f3ed] px-3 py-1 text-[12px] font-medium text-[#0a6154]"
                 onClick={onDelete}
               >
                 删除
@@ -430,7 +430,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             value={draftContent}
             placeholder="输入短文本内容"
             onChange={(e) => setDraftContent(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
           />
         );
       case 'text-long':
@@ -440,7 +440,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             placeholder="输入长文本内容"
             rows={4}
             onChange={(e) => setDraftContent(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-none"
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none resize-none"
           />
         );
       case 'date':
@@ -449,7 +449,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             type="datetime-local"
             value={draftContent}
             onChange={(e) => setDraftContent(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
           />
         );
       case 'number':
@@ -458,7 +458,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             type="number"
             value={draftContent}
             onChange={(e) => setDraftContent(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
           />
         );
       case 'image':
@@ -470,9 +470,9 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
               multiple
               className="block w-full text-xs text-slate-600
                          file:mr-3 file:rounded-full file:border-0
-                         file:bg-purple-50 file:px-3 file:py-1.5
-                         file:text-xs file:font-medium file:text-purple-700
-                         hover:file:bg-purple-100"
+                         file:bg-[#eef6fd] file:px-3 file:py-1.5
+                         file:text-xs file:font-medium file:text-[#0a6154]
+                         hover:file:bg-[#d4f3ed]"
               onChange={(e) => {
                 const files = Array.from(e.target.files || []);
                 const names = files.map((f) => f.name).join('\n');
@@ -484,7 +484,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
               placeholder="每行一个图片链接或文件名"
               rows={3}
               onChange={(e) => setDraftContent(e.target.value)}
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-none text-xs"
+              className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none resize-none text-xs"
             />
           </div>
         );
@@ -499,7 +499,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
                 setDraftContent(next);
               }}
               rows={3}
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-xs leading-relaxed resize-y"
+              className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none text-xs leading-relaxed resize-y"
               placeholder={DEFAULT_AI_SUMMARY_PROMPT}
             />
             <p className="text-xs text-slate-400">
@@ -520,7 +520,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             type="text"
             value={draftContent}
             onChange={(e) => setDraftContent(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#43ccb0] outline-none"
           />
         );
     }
@@ -586,7 +586,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             <button
               type="button"
               onClick={() => setShowAddPanel((prev) => !prev)}
-              className="px-4 py-2 border border-purple-400 rounded-lg text-purple-700 hover:border-purple-500 hover:bg-purple-50 transition-colors flex items-center gap-2 text-[12px]"
+              className="px-4 py-2 border border-[#6bd8c0] rounded-lg text-[#0a6154] hover:border-[#43ccb0] hover:bg-[#eef6fd] transition-colors flex items-center gap-2 text-[12px]"
             >
               <span className="text-[12px]">➕</span>
               <span>添加组件</span>
@@ -595,7 +595,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
               type="button"
               onClick={handleSaveTemplate}
               disabled={componentInstances.length === 0 || submitting}
-              className="px-4 py-2 border border-purple-300 rounded-lg text-slate-700 hover:border-purple-500 hover:text-purple-700 disabled:opacity-40"
+              className="px-4 py-2 border border-[#90e2d0] rounded-lg text-slate-700 hover:border-[#43ccb0] hover:text-[#0a6154] disabled:opacity-40"
             >
               保存为模板
             </button>
@@ -611,7 +611,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
                       key={component.id}
                       className={`border rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer text-sm ${
                         selection.includes(component.id)
-                          ? 'border-purple-500 bg-white text-purple-600'
+                          ? 'border-[#43ccb0] bg-white text-[#0a917a]'
                           : 'border-slate-200 bg-white hover:border-slate-300'
                       }`}
                     >
@@ -641,7 +641,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
                       key={component.id}
                       className={`border rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer text-sm ${
                         selection.includes(component.id)
-                          ? 'border-purple-500 bg-white text-purple-600'
+                          ? 'border-[#43ccb0] bg-white text-[#0a917a]'
                           : 'border-slate-200 bg-white hover:border-slate-300'
                       }`}
                     >
@@ -676,7 +676,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg disabled:opacity-40"
+                  className="px-4 py-2 bg-[#06c3a8] text-white rounded-lg disabled:opacity-40"
                   disabled={selection.length === 0}
                   onClick={addComponents}
                 >
@@ -688,7 +688,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
 
           <div className="space-y-3">
             {componentInstances.length === 0 && (
-              <div className="border border-dashed border-purple-300 rounded-2xl p-10 text-center text-slate-500">
+              <div className="border border-dashed border-[#90e2d0] rounded-2xl p-10 text-center text-slate-500">
                 暂无组件，点击「添加组件」开始构建笔记结构
               </div>
             )}
@@ -754,7 +754,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
               resetModalState();
               onClose();
             }}
-            className="px-4 py-2 rounded-lg border border-purple-300 text-slate-700 hover:bg-purple-50 hover:border-purple-500 transition-colors text-[12px]"
+            className="px-4 py-2 rounded-lg border border-[#90e2d0] text-slate-700 hover:bg-[#eef6fd] hover:border-[#43ccb0] transition-colors text-[12px]"
           >
             取消
           </button>
@@ -762,7 +762,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             type="button"
             onClick={handleSaveTemplate}
             disabled={componentInstances.length === 0 || submitting}
-            className="px-4 py-2 rounded-lg border border-purple-400 text-purple-700 hover:border-purple-500 hover:bg-purple-50 disabled:opacity-40 text-[12px]"
+            className="px-4 py-2 rounded-lg border border-[#6bd8c0] text-[#0a6154] hover:border-[#43ccb0] hover:bg-[#eef6fd] disabled:opacity-40 text-[12px]"
           >
             保存模板
           </button>
@@ -770,7 +770,7 @@ const NewNoteModal: React.FC<NewNoteModalProps> = ({
             type="button"
             onClick={handleCreateNote}
             disabled={componentInstances.length === 0 || submitting}
-            className="px-5 py-2 rounded-lg bg-[#1a1a1a] text-white shadow-lg shadow-purple-500/30 disabled:bg-slate-300 disabled:cursor-not-allowed text-[12px]"
+            className="px-5 py-2 rounded-lg bg-[#06c3a8] text-white shadow-lg shadow-[#8de2d5] disabled:bg-slate-300 disabled:cursor-not-allowed text-[12px]"
           >
             {submitting ? '提交中...' : '创建笔记'}
           </button>
