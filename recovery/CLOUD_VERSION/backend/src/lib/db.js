@@ -250,6 +250,30 @@ export async function initDB() {
   };
 }
 
+const PARSE_HISTORY_ALTER_STATEMENTS = [
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_source TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_platform TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_author TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_published_at TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN suggested_notebook_id TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN suggested_notebook_name TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN assigned_notebook_id TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN assigned_notebook_name TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN status TEXT DEFAULT 'processing'",
+  "ALTER TABLE article_parse_history ADD COLUMN parse_query TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN coze_response_data TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_fields TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN tags TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN notes TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN note_ids TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP",
+  "ALTER TABLE article_parse_history ADD COLUMN parsed_at TEXT",
+  "ALTER TABLE article_parse_history ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP"
+];
+
+const isDuplicateColumnError = (error = {}) =>
+  typeof error?.message === 'string' && error.message.includes('duplicate column name');
+
 /**
  * 初始化数据库表结构（异步版本，用于 Turso）
  * @param {object} db - 数据库实例
@@ -346,12 +370,15 @@ async function initializeTables(db) {
   
   try {
     // 使用重试机制执行表创建
-    const executeWithRetry = async (sql, maxRetries = 3, delay = 1000) => {
+    const executeWithRetry = async (sql, maxRetries = 3, delay = 1000, ignoreDuplicateColumnErrors = false) => {
       for (let i = 0; i < maxRetries; i++) {
         try {
           await db.execute(sql);
           return;
         } catch (error) {
+          if (ignoreDuplicateColumnErrors && isDuplicateColumnError(error)) {
+            return;
+          }
           const isTimeoutError = error.message?.includes('timeout') || 
                                 error.message?.includes('TIMEOUT') ||
                                 error.message?.includes('fetch failed') ||
@@ -408,6 +435,13 @@ async function initializeTables(db) {
       } catch (indexError) {
         // 索引创建失败不影响主流程，只记录警告
         console.warn(`⚠️ 创建索引失败（可能已存在）: ${indexSql}`, indexError.message);
+      }
+    }
+    for (const alterSql of PARSE_HISTORY_ALTER_STATEMENTS) {
+      try {
+        await executeWithRetry(alterSql, 2, 200, true);
+      } catch (alterError) {
+        console.warn(`⚠️ 扩展 article_parse_history 列失败（已忽略）: ${alterSql}`, alterError?.message || alterError);
       }
     }
     console.log('✅ 数据库表初始化完成');
@@ -514,13 +548,13 @@ function initializeTablesSync(db) {
   try {
     db.exec(createParseHistoryTable);
     db.exec(createNotebooksTable);
-  db.exec(createNotesTable);
-  db.exec(createAnalysisResultsTable);
-  db.exec(createAiAnalysisSettingTable);
-  db.exec(createFieldTemplateTable);
-  db.exec(createFieldTemplatePreferenceTable);
-  db.exec(createAiFieldDefinitionsTable);
-  db.exec(createAiFieldValuesTable);
+    db.exec(createNotesTable);
+    db.exec(createAnalysisResultsTable);
+    db.exec(createAiAnalysisSettingTable);
+    db.exec(createFieldTemplateTable);
+    db.exec(createFieldTemplatePreferenceTable);
+    db.exec(createAiFieldDefinitionsTable);
+    db.exec(createAiFieldValuesTable);
     
     // 创建索引以优化查询性能
     const createIndexes = [
@@ -536,13 +570,13 @@ function initializeTablesSync(db) {
       // notebooks 表的索引
       `CREATE INDEX IF NOT EXISTS idx_notebooks_updated_at ON notebooks(updated_at DESC)`,
       // analysis_results 表的索引
-    `CREATE INDEX IF NOT EXISTS idx_analysis_notebook_id ON analysis_results(notebook_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_analysis_updated_at ON analysis_results(updated_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_field_template_notebook ON notebook_field_templates(notebook_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_field_template_source ON notebook_field_templates(source_type)`,
-    `CREATE INDEX IF NOT EXISTS idx_ai_field_def_notebook_key ON ai_field_definitions(notebook_id, field_key)`,
-    `CREATE INDEX IF NOT EXISTS idx_ai_field_values_field_note ON ai_field_values(field_def_id, note_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_ai_field_values_note ON ai_field_values(note_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_analysis_notebook_id ON analysis_results(notebook_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_analysis_updated_at ON analysis_results(updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_field_template_notebook ON notebook_field_templates(notebook_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_field_template_source ON notebook_field_templates(source_type)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_field_def_notebook_key ON ai_field_definitions(notebook_id, field_key)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_field_values_field_note ON ai_field_values(field_def_id, note_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_field_values_note ON ai_field_values(note_id)`
     ];
     
     for (const indexSql of createIndexes) {
@@ -556,6 +590,16 @@ function initializeTablesSync(db) {
       }
     }
     console.log('✅ 数据库索引创建完成');
+
+    for (const alterSql of PARSE_HISTORY_ALTER_STATEMENTS) {
+      try {
+        db.exec(alterSql);
+      } catch (alterError) {
+        if (!isDuplicateColumnError(alterError)) {
+          console.warn(`⚠️ 扩展 article_parse_history 列失败（已忽略）: ${alterSql}`, alterError?.message || alterError);
+        }
+      }
+    }
     
     // 迁移：确保 ai_analysis_setting 表有 config_data 列
     try {

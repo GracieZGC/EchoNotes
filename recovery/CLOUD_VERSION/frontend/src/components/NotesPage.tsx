@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import apiClient, { Notebook } from '../apiClient';
 import NewNoteModal from './NewNoteModal';
 import MoveNoteModal from './MoveNoteModal';
-import AIModal from './AIModal';
 import { onConfigUpdate } from '../utils/componentSync';
 import { getDisplayTitle } from '../utils/displayTitle';
 
@@ -271,6 +270,7 @@ const NoteItem = ({
   onNoteClick, 
   notebooks, 
   currentNotebookId, 
+  highlightNoteId,
   batchMode, 
   isSelected, 
   onSelect 
@@ -280,6 +280,7 @@ const NoteItem = ({
   onNoteClick: () => void;
   notebooks: Notebook[];
   currentNotebookId: string;
+  highlightNoteId: string | null;
   batchMode: boolean;
   isSelected: boolean;
   onSelect: (noteId: string) => void;
@@ -328,11 +329,15 @@ const NoteItem = ({
     console.log('🖱️ 笔记卡片被点击，但不会跳转');
   };
 
+  const currentNoteId = String(note.id || note.note_id || '');
+  const isHighlighted = !!highlightNoteId && currentNoteId && highlightNoteId === currentNoteId;
+
   return (
     <div 
+      data-note-id={currentNoteId || undefined}
       className={`bg-white p-3 rounded-xl border border-gray-200 flex items-center justify-between hover:shadow-sm transition-shadow duration-200 cursor-default ${
         isSelected ? 'ring-2 ring-[#43ccb0] bg-[#eef6fd]' : ''
-      }`}
+      } ${isHighlighted ? 'ring-2 ring-[#b5ece0] border-[#90e2d0] bg-white/90' : ''}`}
       onClick={handleCardClick}
     >
       <div className="flex items-center gap-3">
@@ -416,7 +421,7 @@ const NoteItem = ({
         </button>
         {menuOpen && (
           <div 
-            className="dropdown-menu absolute top-8 right-0 w-40 bg-white border border-gray-200 rounded-md shadow-lg z-50"
+            className="dropdown-menu absolute top-8 right-0 w-40 bg-white rounded-2xl shadow-xl border-2 border-[#b5ece0] z-50 overflow-hidden text-xs"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             style={{ zIndex: 9999 }}
@@ -432,7 +437,7 @@ const NoteItem = ({
                 }
                 setMenuOpen(false);
               }} 
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+              className="w-full text-left px-4 py-2 text-slate-900 hover:bg-[#eef6fd]"
             >
               访问源网址
             </button>
@@ -443,7 +448,7 @@ const NoteItem = ({
                 setRenaming(true);
                 setMenuOpen(false);
               }} 
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-[#eef6fd] hover:text-[#0a6154] transition-colors"
+              className="w-full text-left px-4 py-2 text-slate-900 hover:bg-[#eef6fd] hover:text-[#0a6154] transition-colors"
             >
               重命名
             </button>
@@ -454,7 +459,7 @@ const NoteItem = ({
                 setMoveOpen(true);
                 setMenuOpen(false);
               }} 
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+              className="w-full text-left px-4 py-2 text-slate-900 hover:bg-[#eef6fd]"
             >
               移到
             </button>
@@ -473,7 +478,7 @@ const NoteItem = ({
                 }
                 setMenuOpen(false);
               }} 
-              className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+              className="w-full text-left px-4 py-2 text-rose-600 hover:bg-rose-50"
             >
               删除
             </button>
@@ -502,6 +507,7 @@ const NoteItem = ({
 
 const NotesPage = ({ notebookId }: { notebookId: string }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -518,6 +524,39 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
   // 批量操作状态
   const [batchMode, setBatchMode] = useState(false);
   const [selectedNotes, setSelectedNotes] = useState<string[]>([]);
+
+  const highlightNoteId = useRef<string | null>(null);
+  const [activeHighlightNoteId, setActiveHighlightNoteId] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      const id = params.get('highlightNoteId');
+      highlightNoteId.current = id ? String(id) : null;
+      setActiveHighlightNoteId(highlightNoteId.current);
+    } catch {
+      highlightNoteId.current = null;
+      setActiveHighlightNoteId(null);
+    }
+  }, [location.search]);
+
+  useEffect(() => {
+    const id = activeHighlightNoteId;
+    if (!id) return;
+    if (!notes || notes.length === 0) return;
+    const timer = window.setTimeout(() => {
+      const selectorId = id.replace(/"/g, '\\"');
+      const el = document.querySelector(`[data-note-id="${selectorId}"]`) as HTMLElement | null;
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 50);
+    const clearTimer = window.setTimeout(() => setActiveHighlightNoteId(null), 3500);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [activeHighlightNoteId, notes]);
   const [batchMoveModalOpen, setBatchMoveModalOpen] = useState(false);
   const [batchDeleteConfirmOpen, setBatchDeleteConfirmOpen] = useState(false);
   
@@ -535,9 +574,6 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
     endDate: ''
   });
   
-  // AI总结状态
-  const [aiModalOpen, setAiModalOpen] = useState(false);
-
   const isMountedRef = useRef(false);
   useEffect(() => {
     isMountedRef.current = true;
@@ -852,35 +888,6 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
     }
   };
 
-  // AI总结功能
-  const handleAISummary = () => {
-    if (filteredNotes.length === 0) {
-      alert('没有可总结的笔记');
-      return;
-    }
-    
-    setAiModalOpen(true);
-  };
-
-  // 准备AI助手的上下文数据
-  const getAIContext = () => {
-    const notesData = filteredNotes.map(note => ({
-      title: note.title,
-      content: note.content,
-      created_at: note.created_at
-    }));
-
-    return {
-      notebook_name: notebook?.name || '当前笔记本',
-      notes_count: filteredNotes.length,
-      notes: notesData,
-      date_range: dateFilter.startDate && dateFilter.endDate ? {
-        start: dateFilter.startDate,
-        end: dateFilter.endDate
-      } : null
-    };
-  };
-
   if (loading && !hasLoadedOnce) {
     return <div className="flex items-center justify-center h-full text-gray-500">Loading notes...</div>;
   }
@@ -894,7 +901,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
   }
 
   return (
-    <div className="pl-2 pr-6 pt-2 pb-12 h-full overflow-y-auto no-scrollbar">
+    <div className="pl-2 pr-6 pt-0 pb-12 h-full overflow-y-auto no-scrollbar">
       {/* Header Section */}
       <div className="mb-6">
         <div className="grid grid-cols-[260px_1fr] gap-4 items-stretch">
@@ -913,7 +920,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
           </div>
           
           <div className="flex flex-col gap-3 justify-between h-full">
-            {/* 日期筛选和AI总结按钮 */}
+            {/* 日期筛选 */}
             <div className="flex items-start justify-end gap-3 flex-wrap">
               {/* 日期筛选器 */}
               <div className="flex items-center gap-2">
@@ -932,6 +939,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
                   className="px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#43ccb0]"
                 />
                 <button
+                  type="button"
                   onClick={() => {
                     console.log('🔍 执行日期筛选查询:', dateFilter);
                   }}
@@ -940,18 +948,6 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
                   查询
                 </button>
               </div>
-              
-              {/* AI总结按钮 */}
-              <button
-                onClick={handleAISummary}
-                disabled={filteredNotes.length === 0}
-                className="px-3 py-2 text-xs font-medium text-white bg-[#06c3a8] rounded-2xl hover:bg-[#04b094] shadow-lg shadow-[#8de2d5] disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-                AI总结和建议
-              </button>
             </div>
             
             {/* 搜索、筛选、批量操作等按钮 */}
@@ -1030,10 +1026,6 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
                 )}
                 {!batchMode && (
                   <>
-                    <button onClick={() => navigate('/CreateNote')} className="px-3 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-2xl hover:bg-[#eef6fd] hover:border-[#b5ece0] flex items-center gap-2 whitespace-nowrap">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
-                        新建笔记本
-                    </button>
                     <button onClick={() => {
                       const isFitnessNotebook = notebook?.name?.toLowerCase().includes('健身') || 
                                               notebook?.name?.toLowerCase().includes('fitness');
@@ -1065,6 +1057,7 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
             displayTitle={buildNoteCardTitle(note, index + 1, notebooks, currentNotebookId)}
             notebooks={notebooks}
             currentNotebookId={currentNotebookId}
+            highlightNoteId={activeHighlightNoteId}
             batchMode={batchMode}
             isSelected={selectedNotes.includes(note.id || note.note_id || '')}
             onSelect={handleNoteSelect}
@@ -1170,13 +1163,6 @@ const NotesPage = ({ notebookId }: { notebookId: string }) => {
         </div>
       )}
 
-      {/* AI助手模态框 */}
-      <AIModal 
-        isOpen={aiModalOpen}
-        onClose={() => setAiModalOpen(false)}
-        context={JSON.stringify(getAIContext())}
-        notes={filteredNotes}
-      />
     </div>
   );
 }

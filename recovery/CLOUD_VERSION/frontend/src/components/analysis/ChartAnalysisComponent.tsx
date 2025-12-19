@@ -1,5 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, Area, AreaChart, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import {
+  LineChart,
+  Line,
+  Area,
+  AreaChart,
+  PieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  BarChart,
+  Bar
+} from 'recharts';
 import apiClient from '../../apiClient';
 
 interface ChartAnalysisComponentProps {
@@ -41,6 +57,7 @@ function ChartAnalysisComponent({
 }: ChartAnalysisComponentProps) {
   const [notesData, setNotesData] = useState<any[]>([]);
   const [loadingNotes, setLoadingNotes] = useState(false);
+  const [chartTypeOverrides, setChartTypeOverrides] = useState<Record<string, string>>({});
 
   const formatDateLabel = (value: any) => {
     if (!value) return '';
@@ -257,8 +274,10 @@ function ChartAnalysisComponent({
     <div className="space-y-4">
       {finalChartConfigs.map((chart, index) => {
         // 处理不同的数据结构格式
-        const chartType = chart.type || chart.chartType || 'line';
         const chartId = chart.id || `chart_${index}`;
+        const initialChartType = chart.type || chart.chartType || 'line';
+        const overrideChartType = chartTypeOverrides[chartId];
+        const chartType = overrideChartType || initialChartType;
         let chartData = chart.data || [];
         let chartConfig: any = chart.config || {};
         const xKey = (chartConfig?.xField)
@@ -423,6 +442,20 @@ function ChartAnalysisComponent({
 
         const displayDataCount = chartData.filter((item: any) => !item?.__syntheticPoint).length;
 
+        const chartReason: string | null = (() => {
+          if (typeof (chart as any).reason === 'string' && (chart as any).reason.trim()) {
+            return (chart as any).reason.trim();
+          }
+          if (typeof chartConfig.reason === 'string' && chartConfig.reason.trim()) {
+            return chartConfig.reason.trim();
+          }
+          if (analysisResult?.aiRecommendation && typeof analysisResult.aiRecommendation === 'object') {
+            const r = (analysisResult.aiRecommendation as any).reason || (analysisResult.aiRecommendation as any).why;
+            if (typeof r === 'string' && r.trim()) return r.trim();
+          }
+          return null;
+        })();
+
         // 处理多条数据线（如果有 point 字段，按 point 分组）
         const hasMultipleSeries = chartData.some((item: any) => item.point || item.pointField);
         let chartSeries: any[] = [];
@@ -500,20 +533,54 @@ function ChartAnalysisComponent({
           );
         };
 
-            return (
-              <div key={chartId} className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-lg font-semibold text-slate-900">{chartTitle}</h4>
-                  <div className="text-xs text-slate-400 text-right leading-5">
-                <div>X 轴：({displayXAxisName})</div>
-                <div>Y 轴：({displayYAxisName})</div>
-                {displayDataCount > 0 && (
-                  <div className="text-slate-500 mt-1">数据点：{displayDataCount}</div>
-                )}
+        const availableChartTypes: Array<{ value: string; label: string }> = [
+          { value: 'line', label: getChartTypeLabel('line') },
+          { value: 'bar', label: getChartTypeLabel('bar') },
+          { value: 'pie', label: getChartTypeLabel('pie') },
+          { value: 'area', label: getChartTypeLabel('area') }
+        ];
+
+        const handleChartTypeSelect = (nextType: string) => {
+          setChartTypeOverrides(prev => ({
+            ...prev,
+            [chartId]: nextType
+          }));
+        };
+
+        return (
+          <div key={chartId} className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h4 className="text-lg font-semibold text-slate-900">{chartTitle}</h4>
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400">图表类型</span>
+                  <select
+                    value={chartType}
+                    onChange={event => handleChartTypeSelect(event.target.value)}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-700 focus:outline-none focus:ring-1 focus:ring-[#06c3a8]"
+                  >
+                    {availableChartTypes.map(option => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                        {option.value === initialChartType ? '（AI 推荐）' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="text-xs text-slate-400 text-right leading-5">
+                  <div>X 轴：({displayXAxisName})</div>
+                  <div>Y 轴：({displayYAxisName})</div>
+                  {displayDataCount > 0 && (
+                    <div className="text-slate-500 mt-1">数据点：{displayDataCount}</div>
+                  )}
+                </div>
               </div>
             </div>
 
-            <div className="rounded-2xl bg-white border border-gray-200 p-6 shadow-md" style={{ boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)' }}>
+            <div
+              className="rounded-2xl bg-white border border-gray-200 p-6 shadow-md"
+              style={{ boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)' }}
+            >
               {/* 图表内容 */}
               <div className="w-full" style={{ height: chartType === 'pie' ? '300px' : '280px' }}>
                 {chartData.length > 0 ? (
@@ -522,7 +589,7 @@ function ChartAnalysisComponent({
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart 
                           data={mergedLineData.length > 0 ? mergedLineData : chartData} 
-                          margin={{ top: 10, right: 10, left: 0, bottom: 10 }}
+                          margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
                         >
                           <defs>
                             <linearGradient id="colorGradient" x1="0" y1="0" x2="0" y2="1">
@@ -617,6 +684,97 @@ function ChartAnalysisComponent({
                               />
                             </>
                           )}
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    ) : chartType === 'bar' ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={chartData.filter((item: any) => !item?.__syntheticPoint)}
+                          margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                          <XAxis
+                            dataKey="xNumeric"
+                            type="number"
+                            domain={['dataMin', 'dataMax']}
+                            allowDataOverflow
+                            ticks={xTicks}
+                            stroke="#000"
+                            tick={{ fontSize: 12, fill: '#000' }}
+                            tickLine={false}
+                            axisLine={false}
+                            tickFormatter={(value) => {
+                              if (xLabelMap.has(value)) return xLabelMap.get(value)!;
+                              return formatDateLabel(value) || '';
+                            }}
+                          />
+                          <YAxis
+                            stroke="#000"
+                            tick={{ fontSize: 12, fill: '#000' }}
+                            tickLine={true}
+                            axisLine={false}
+                            domain={yDomain || [0, 'auto']}
+                            ticks={yTicks}
+                            allowDecimals={yDomain ? false : true}
+                            tickCount={yDomain ? undefined : 5}
+                            tickFormatter={(value) => categoryLabelMap[value] || value}
+                          />
+                          <Tooltip content={renderLineTooltip} />
+                          <Bar
+                            dataKey="yNumeric"
+                            fill="#FF6347"
+                            radius={[4, 4, 0, 0]}
+                            maxBarSize={40}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : chartType === 'area' ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart
+                          data={chartData}
+                          margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
+                        >
+                          <defs>
+                            <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#FF6347" stopOpacity={0.35} />
+                              <stop offset="95%" stopColor="#FF6347" stopOpacity={0.05} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                          <XAxis
+                            dataKey="xNumeric"
+                            type="number"
+                            domain={['dataMin', 'dataMax']}
+                            allowDataOverflow
+                            ticks={xTicks}
+                            stroke="#000"
+                            tick={{ fontSize: 12, fill: '#000' }}
+                            tickLine={false}
+                            axisLine={false}
+                            tickFormatter={(value) => {
+                              if (xLabelMap.has(value)) return xLabelMap.get(value)!;
+                              return formatDateLabel(value) || '';
+                            }}
+                          />
+                          <YAxis
+                            stroke="#000"
+                            tick={{ fontSize: 12, fill: '#000' }}
+                            tickLine={true}
+                            axisLine={false}
+                            domain={yDomain || [0, 'auto']}
+                            ticks={yTicks}
+                            allowDecimals={yDomain ? false : true}
+                            tickCount={yDomain ? undefined : 5}
+                            tickFormatter={(value) => categoryLabelMap[value] || value}
+                          />
+                          <Tooltip content={renderLineTooltip} />
+                          <Area
+                            type="monotone"
+                            dataKey="yNumeric"
+                            stroke="#FF6347"
+                            strokeWidth={2}
+                            fill="url(#areaGradient)"
+                          />
                         </AreaChart>
                       </ResponsiveContainer>
                     ) : chartType === 'pie' ? (

@@ -36,8 +36,7 @@ const TypeNotesPage: React.FC = () => {
   const [editorContent, setEditorContent] = useState<{ html: string; text: string } | null>(null);
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
   const [parseOnlyLoading, setParseOnlyLoading] = useState(false);
-  const [aiParseLoading, setAiParseLoading] = useState(false);
-  const [aiAssignLoading, setAiAssignLoading] = useState(false);
+  const [parseAssignLoading, setParseAssignLoading] = useState(false);
 
   useEffect(() => {
     const draft = getQuickNoteDraft();
@@ -55,7 +54,7 @@ const TypeNotesPage: React.FC = () => {
 
   const currentPlainText = editorContent?.text ?? initialContent?.plainText ?? '';
   const hasContent = currentPlainText.trim().length > 0;
-  const isAnyParsing = parseOnlyLoading || aiParseLoading || aiAssignLoading;
+  const isAnyParsing = parseOnlyLoading || parseAssignLoading;
 
   const handleParseOnly = async () => {
     if (!hasContent || isAnyParsing) return;
@@ -69,8 +68,8 @@ const TypeNotesPage: React.FC = () => {
         throw new Error(response?.data?.error || '解析失败');
       }
       const historyId = response.data.data?.historyId;
-      const go = window.confirm(`仅解析完成（历史ID：${historyId || '未知'}）。是否跳转到 AI 导入页查看？`);
-      if (go) navigate('/ai-import');
+      const go = window.confirm(`仅解析完成（历史ID：${historyId || '未知'}）。是否跳转到工作台查看？`);
+      if (go) navigate('/workspace');
     } catch (error: any) {
       window.alert(error?.response?.data?.error || error?.message || '解析失败，请稍后重试。');
     } finally {
@@ -78,32 +77,10 @@ const TypeNotesPage: React.FC = () => {
     }
   };
 
-  const handleAIParse = async () => {
+  const handleParseAndAssign = async () => {
     if (!hasContent || isAnyParsing) return;
     try {
-      setAiParseLoading(true);
-      const response = await apiClient.post('/api/parse-text', {
-        title: title.trim() || undefined,
-        content: currentPlainText.trim(),
-        aiSummaryConfig: { enabled: true, prompt: DEFAULT_AI_SUMMARY_PROMPT }
-      });
-      if (!response?.data?.success) {
-        throw new Error(response?.data?.error || '解析失败');
-      }
-      const historyId = response.data.data?.historyId;
-      const go = window.confirm(`AI 解析完成（历史ID：${historyId || '未知'}）。是否跳转到 AI 导入页查看？`);
-      if (go) navigate('/ai-import');
-    } catch (error: any) {
-      window.alert(error?.response?.data?.error || error?.message || '解析失败，请稍后重试。');
-    } finally {
-      setAiParseLoading(false);
-    }
-  };
-
-  const handleAIParseAndAssign = async () => {
-    if (!hasContent || isAnyParsing) return;
-    try {
-      setAiAssignLoading(true);
+      setParseAssignLoading(true);
       const response = await apiClient.post('/api/parse-and-assign-text', {
         title: title.trim() || undefined,
         content: currentPlainText.trim(),
@@ -114,12 +91,12 @@ const TypeNotesPage: React.FC = () => {
       }
       const message = response.data.data?.message || 'AI 解析并分配完成';
       const historyId = response.data.data?.historyId;
-      const go = window.confirm(`${message}（历史ID：${historyId || '未知'}）。是否跳转到 AI 导入页查看？`);
-      if (go) navigate('/ai-import');
+      const go = window.confirm(`${message}（历史ID：${historyId || '未知'}）。是否跳转到工作台查看？`);
+      if (go) navigate('/workspace');
     } catch (error: any) {
       window.alert(error?.response?.data?.error || error?.message || '解析并分配失败，请稍后重试。');
     } finally {
-      setAiAssignLoading(false);
+      setParseAssignLoading(false);
     }
   };
 
@@ -223,21 +200,12 @@ const TypeNotesPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={handleAIParse}
-              disabled={!hasContent || isAnyParsing}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-              title="AI 解析（生成摘要与要点，不自动分配）"
-            >
-              {aiParseLoading ? '解析中…' : 'AI解析'}
-            </button>
-            <button
-              type="button"
-              onClick={handleAIParseAndAssign}
+              onClick={handleParseAndAssign}
               disabled={!hasContent || isAnyParsing}
               className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
               title="AI 解析并自动分配到推荐笔记本"
             >
-              {aiAssignLoading ? '处理中…' : 'AI解析并分配'}
+              {parseAssignLoading ? '处理中…' : '解析并分配'}
             </button>
             <button
               type="button"

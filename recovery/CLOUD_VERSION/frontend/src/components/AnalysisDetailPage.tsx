@@ -287,7 +287,7 @@ const AnalysisDetailPage: React.FC<AnalysisDetailPageProps> = ({ analysisIdOverr
   return (
     <div className="min-h-screen bg-transparent">
       {/* 分析详情头部 */}
-      <div className="max-w-6xl mx-auto px-4 py-6 space-y-4">
+      <div className="max-w-6xl mx-auto px-4 pt-0 pb-6 space-y-4">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">

@@ -1574,7 +1574,7 @@ export function initParseRoutes(db) {
   // 获取解析历史列表
   router.get('/api/coze/parse-history', async (req, res) => {
     try {
-      const { page = 1, limit = 20, status, notebook_id } = req.query;
+      const { page = 1, limit = 20, status, notebook_id, keyword } = req.query;
       const offset = (parseInt(page) - 1) * parseInt(limit);
       
       let query = 'SELECT * FROM article_parse_history WHERE 1=1';
@@ -1591,6 +1591,13 @@ export function initParseRoutes(db) {
       if (notebook_id) {
         query += ' AND (suggested_notebook_id = ? OR assigned_notebook_id = ?)';
         params.push(notebook_id, notebook_id);
+      }
+
+      if (keyword && typeof keyword === 'string' && keyword.trim()) {
+        const likeValue = `%${keyword.trim()}%`;
+        query +=
+          ' AND (parsed_title LIKE ? OR parsed_summary LIKE ? OR source_url LIKE ? OR parsed_content LIKE ?)';
+        params.push(likeValue, likeValue, likeValue, likeValue);
       }
       
       query += ' ORDER BY COALESCE(parsed_at, created_at) DESC LIMIT ? OFFSET ?';
@@ -1617,6 +1624,13 @@ export function initParseRoutes(db) {
       if (notebook_id) {
         countQuery += ' AND (suggested_notebook_id = ? OR assigned_notebook_id = ?)';
         countParams.push(notebook_id, notebook_id);
+      }
+
+      if (keyword && typeof keyword === 'string' && keyword.trim()) {
+        const likeValue = `%${keyword.trim()}%`;
+        countQuery +=
+          ' AND (parsed_title LIKE ? OR parsed_summary LIKE ? OR source_url LIKE ? OR parsed_content LIKE ?)';
+        countParams.push(likeValue, likeValue, likeValue, likeValue);
       }
       
       const countResult = await db.get(countQuery, countParams);
@@ -2270,6 +2284,7 @@ export function initParseRoutes(db) {
       let responseData = null;
       let parsedSummary = null;
       let parsedFields = {};
+      const normalizedSourceUrl = sanitizeSourceUrlValue(cleanedArticleUrl, historyId);
       
       // 仅使用 Coze Workflow
       if (COZE_ACCESS_TOKEN && COZE_WORKFLOW_ID) {
@@ -2630,7 +2645,7 @@ export function initParseRoutes(db) {
         } else {
           const insertValues = [
             historyId,
-            normalizedSourceUrl || cleanedArticleUrl,
+            cleanedArticleUrl,
             contentToSave,
             finalParsedTitle,
             finalParsedSummary,
@@ -2692,7 +2707,7 @@ export function initParseRoutes(db) {
             notebookId: suggestedNotebookId,
             parsedFields,
             historyId,
-            sourceUrl: normalizedSourceUrl || cleanedArticleUrl,
+            sourceUrl: cleanedArticleUrl,
             sourceType: 'link'
           });
           if (assignmentResult?.success) {

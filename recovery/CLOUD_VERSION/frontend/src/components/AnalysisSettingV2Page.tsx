@@ -1,4 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import {
+  DndContext,
+  type DragEndEvent,
+  MouseSensor,
+  TouchSensor,
+  rectIntersection,
+  useDroppable,
+  useDraggable,
+  useSensor,
+  useSensors
+} from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
 import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -23,7 +35,8 @@ import type { ComponentInstance } from '../utils/componentSync';
 import { createComponentInstance, parseComponentConfig as parseNotebookComponentConfig, type ComponentType } from '../constants/notebookComponents';
 
 type FieldRole = 'dimension' | 'metric';
-type FieldSource = 'notebook' | 'system' | 'ai-temp';
+type AxisSlot = 'dimension' | 'dimension2' | 'metric';
+type FieldSource = 'notebook' | 'system' | 'ai-temp' | 'custom';
 type FieldDataType = 'date' | 'number' | 'text' | 'category';
 
 interface FieldDefinition {
@@ -69,11 +82,36 @@ interface ChartInstance {
   title: string;
   chartType: ChartType;
   reason?: string;
-  dimensions: string[];
-  metrics: string[];
+  dimensionCandidates: string[];
+  dimension2Candidates?: string[];
+  metricCandidates: string[];
+  selectedDimension: string | null;
+  selectedDimension2?: string | null;
+  selectedMetric: string | null;
   filters: string[];
   createdAt: number;
 }
+
+interface SavedChartConfigResult {
+  candidates: ChartCandidate[];
+  instances: ChartInstance[];
+  activeChartId: string | null;
+}
+
+type AnalysisStage =
+  | 'idle'
+  | 'loading'
+  | 'recommending'
+  | 'deriving_fields'
+  | 'reranking'
+  | 'ready'
+  | 'error';
+
+const AXIS_DROP_TARGET_IDS = {
+  dimension: 'axis-drop-dimension',
+  dimension2: 'axis-drop-dimension2',
+  metric: 'axis-drop-metric'
+} as const;
 
 const LineChartIcon = (
   <svg viewBox="0 0 1024 1024" className="w-6 h-6" aria-hidden="true" focusable="false">
@@ -154,6 +192,124 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
 
 const MIN_COLUMN_PERCENT = 20;
 
+// AI 图表分析 V3：policy_overrides + fixed_vocabularies（工程口子，后续可外置为配置/后端下发）
+const AI_CHART_POLICY_OVERRIDES = {
+  field_name_preferences: {
+    time: ['发布时间', '日期', 'created_at', '笔记创建时间', '时间'],
+    topic: ['主题', '标签', '关键词'],
+    amount: ['金额', '支出', '收入']
+  },
+  gates: {
+    pie_topn: 8,
+    line_min_points: 5,
+    heatmap_min_density: 0.1,
+    field_max_missing_rate: 0.4,
+    bar_max_categories: 30
+  }
+} as const;
+
+const AI_CHART_FIXED_VOCABULARIES = {
+  主题: ['模型', '工具', '应用', '行业', '研究', '其他'],
+  情绪来源: ['工作', '家庭', '朋友', '健康', '金钱', '自我成长', '其他'],
+  记账类型: ['餐饮', '交通', '住房', '购物', '娱乐', '医疗', '教育', '其他']
+} as const;
+
+const buildRunKey = (input: {
+  notebookId: string | null | undefined;
+  noteIds: string[];
+  dateRange: { from: string; to: string };
+  templateId: string;
+}) => {
+  const ids = [...(input.noteIds || [])].sort().join(',');
+  return [
+    input.notebookId || '',
+    ids,
+    input.dateRange?.from || '',
+    input.dateRange?.to || '',
+    input.templateId || ''
+  ].join('|');
+};
+
+const applyChartGates = (params: {
+  chartType: 'line' | 'bar' | 'pie' | 'heatmap';
+  dataset: AnalysisDatum[];
+  selected: { timeField?: string; dimensionField?: string; dimensionField2?: string; metricField?: string; aggregation?: string; timeGranularity?: string };
+  gates: { pie_topn: number; line_min_points: number; heatmap_min_density: number; field_max_missing_rate: number; bar_max_categories: number };
+}) => {
+  const { dataset, selected, gates } = params;
+  let chartType = params.chartType;
+
+  const dimension = selected.dimensionField || '';
+  const metric = selected.metricField || '';
+  const timeField = selected.timeField || '';
+  const dim2 = selected.dimensionField2 || '';
+
+  const dimStats = dimension ? computeFieldStats(dataset, dimension) : null;
+  const timeStats = timeField ? computeFieldStats(dataset, timeField) : null;
+  const metricStats = metric && metric !== 'count' ? computeFieldStats(dataset, metric) : null;
+
+  const tooMissing = (s: any) => s && typeof s.missing_rate === 'number' && s.missing_rate > gates.field_max_missing_rate;
+
+  if (tooMissing(dimStats) || tooMissing(timeStats) || tooMissing(metricStats)) {
+    // 数据质量太差：优先退化为 count 的 bar
+    return { chartType: 'bar' as const, reason: '字段缺失率过高，降级为频次柱状图' };
+  }
+
+  if (chartType === 'pie') {
+    if (dimStats && dimStats.cardinality > gates.pie_topn) {
+      return { chartType: 'bar' as const, reason: '饼图类别过多，降级为柱状图（TopN + 其他）' };
+    }
+    if (dimStats && dimStats.cardinality > 12 && dimStats.top_share < 0.15) {
+      return { chartType: 'bar' as const, reason: '类别过多且占比均匀，饼图不可读，降级为柱状图' };
+    }
+  }
+
+  if (chartType === 'bar') {
+    if (dimStats && dimStats.cardinality > gates.bar_max_categories) {
+      return { chartType: 'bar' as const, reason: '类别过多，柱状图将使用 TopN + 其他' };
+    }
+  }
+
+  if (chartType === 'line') {
+    // 折线点数不足：这里仅提示原因，粒度降级后续可做
+    if (timeField) {
+      const points = new Set<string>();
+      dataset.forEach((row) => {
+        const v = (row as any)[timeField];
+        if (v) points.add(String(v));
+      });
+      if (points.size > 0 && points.size < gates.line_min_points) {
+        return { chartType: 'bar' as const, reason: '时间点过少，不适合折线，降级为柱状图' };
+      }
+    }
+  }
+
+  if (chartType === 'heatmap') {
+    if (!dimension || !dim2) {
+      return { chartType: 'bar' as const, reason: '热力图缺少第二维度，降级为柱状图' };
+    }
+    // 稀疏度评估（近似）：以组合出现的比例衡量
+    const combos = new Set<string>();
+    const dimASet = new Set<string>();
+    const dimBSet = new Set<string>();
+    dataset.forEach((row) => {
+      const a = (row as any)[dimension];
+      const b = (row as any)[dim2];
+      if (!a || !b) return;
+      dimASet.add(String(a));
+      dimBSet.add(String(b));
+      combos.add(`${a}|||${b}`);
+    });
+    const totalCells = Math.max(1, dimASet.size * dimBSet.size);
+    const density = combos.size / totalCells;
+    if (density < gates.heatmap_min_density) {
+      return { chartType: 'bar' as const, reason: '热力图过稀疏，不可读，降级为柱状图' };
+    }
+  }
+
+  return { chartType, reason: '' };
+};
+
 const safeParseJSON = (value: unknown): any => {
   if (value === null || value === undefined) return null;
   if (typeof value === 'object') return value;
@@ -218,12 +374,83 @@ const extractKeywords = (text: string): string[] => {
   return unique.slice(0, 8);
 };
 
+const extractRawFieldValue = (
+  note: any,
+  field: FieldDefinition,
+  fieldNameToIdMap?: Record<string, string>
+) => {
+  if (!field) return undefined;
+  const noteData = note?.component_data || note?.componentData || {};
+  const candidateKeys = [
+    field.id,
+    fieldNameToIdMap?.[field.name],
+    field.name,
+    field.name?.replace(/\s+/g, ''),
+    field.name?.replace(/\s+/g, '_')
+  ].filter(Boolean);
+
+  for (const key of candidateKeys) {
+    if (!key) continue;
+    if (noteData[key] !== undefined) return noteData[key];
+    if (note[key] !== undefined) return note[key];
+  }
+  return undefined;
+};
+
+const normalizeFieldValueForDataset = (field: FieldDefinition, rawValue: any) => {
+  if (rawValue === null || rawValue === undefined) return undefined;
+
+  const extractLeafValue = (input: any): any => {
+    if (input === null || input === undefined) return undefined;
+    if (typeof input === 'object' && !Array.isArray(input)) {
+      if ('value' in input) return extractLeafValue((input as any).value);
+      if ('content' in input) return extractLeafValue((input as any).content);
+      if ('text' in input) return extractLeafValue((input as any).text);
+      if ('title' in input) return extractLeafValue((input as any).title);
+      if ('name' in input) return extractLeafValue((input as any).name);
+    }
+    return input;
+  };
+
+  if (field.role === 'metric') {
+    if (typeof rawValue === 'number') return rawValue;
+    if (Array.isArray(rawValue)) return rawValue.length;
+    const extracted = extractLeafValue(rawValue);
+    if (typeof extracted === 'number') return extracted;
+    if (typeof extracted === 'string') {
+      const parsed = Number(extracted);
+      return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    return undefined;
+  }
+
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .map(item => {
+        const extracted = extractLeafValue(item);
+        if (typeof extracted === 'object') {
+          return JSON.stringify(extracted);
+        }
+        return extracted;
+      })
+      .filter(Boolean)
+      .join(',');
+  }
+
+  const extracted = extractLeafValue(rawValue);
+  if (typeof extracted === 'object') {
+    return JSON.stringify(extracted);
+  }
+  return extracted;
+};
+
 const buildAnalysisDataset = (
   notes: Note[],
-  aiValues?: Record<string, Record<string, any>>
+  aiValues?: Record<string, Record<string, any>>,
+  options?: { fields?: FieldDefinition[]; fieldNameToIdMap?: Record<string, string> }
 ): AnalysisDatum[] => {
   if (!Array.isArray(notes)) return [];
-  return notes.map((note, index) => {
+  const dataset = notes.map((note, index) => {
     const textBlob = [note.title, (note as any)?.summary, note.content, (note as any)?.content_text]
       .filter(Boolean)
       .join(' ');
@@ -271,11 +498,49 @@ const buildAnalysisDataset = (
       摘要: (note as any)?.summary || ''
     };
   });
+
+  if (options?.fields?.length) {
+    dataset.forEach((row, index) => {
+      const note = notes[index];
+      options.fields?.forEach(field => {
+        const raw = extractRawFieldValue(note, field, options.fieldNameToIdMap);
+        if (raw === undefined) return;
+        const normalized = normalizeFieldValueForDataset(field, raw);
+        if (normalized === undefined || normalized === '') return;
+        (row as any)[field.name] = normalized;
+      });
+    });
+  }
+
+  return dataset;
 };
 
-const buildSystemFields = (dataset: AnalysisDatum[]): FieldDefinition[] => {
+const buildSystemFields = (dataset: AnalysisDatum[], notebookType?: string | null): FieldDefinition[] => {
   if (!dataset.length) return [];
   const first = dataset[0];
+  const isMoodNotebook =
+    typeof notebookType === 'string' && /情绪|心情|mood/i.test(notebookType);
+
+  const scoreFieldName = isMoodNotebook ? '情绪分数' : 'AI 评分';
+  const scoreDescription = isMoodNotebook
+    ? 'AI 根据文本推测的情绪分值（1-10）'
+    : 'AI 根据文本内容生成的综合评分（1-10）';
+
+  const categoryFieldName = isMoodNotebook ? '情绪类别' : 'AI 分类';
+  const categoryDescription = isMoodNotebook
+    ? '以情绪分数区分的正向/中性/负向标签'
+    : '根据 AI 分析结果生成的分类标签';
+
+  const sourceFieldName = isMoodNotebook ? '情绪来源' : 'AI 来源';
+  const sourceDescription = isMoodNotebook
+    ? '根据文本提取的情绪来源（工作、朋友等）'
+    : '根据文本提取的主要来源/场景';
+
+  const keywordFieldName = isMoodNotebook ? '情绪关键词' : 'AI 关键词';
+  const keywordDescription = isMoodNotebook
+    ? '高频情绪关键词集合，可用于词云或过滤'
+    : 'AI 提取的高频关键词集合，可用于词云或过滤';
+
   const candidates: FieldDefinition[] = [
     {
       id: 'field-date',
@@ -288,38 +553,38 @@ const buildSystemFields = (dataset: AnalysisDatum[]): FieldDefinition[] => {
     },
     {
       id: 'field-mood-score',
-      name: '情绪分数',
+      name: scoreFieldName,
       role: 'metric',
       dataType: 'number',
       source: 'system',
-      description: 'AI 根据文本推测的情绪分值（1-10）',
+      description: scoreDescription,
       sampleValue: String(first.情绪分数)
     },
     {
       id: 'field-mood-category',
-      name: '情绪类别',
+      name: categoryFieldName,
       role: 'dimension',
       dataType: 'category',
       source: 'system',
-      description: '以情绪分数区分的正向/中性/负向标签',
+      description: categoryDescription,
       sampleValue: first.情绪类别
     },
     {
       id: 'field-mood-source',
-      name: '情绪来源',
+      name: sourceFieldName,
       role: 'dimension',
       dataType: 'category',
       source: 'system',
-      description: '根据文本提取的情绪来源（工作、朋友等）',
+      description: sourceDescription,
       sampleValue: first.情绪来源
     },
     {
       id: 'field-keywords',
-      name: '情绪关键词',
+      name: keywordFieldName,
       role: 'dimension',
       dataType: 'text',
       source: 'system',
-      description: '高频关键词集合，可用于词云或过滤',
+      description: keywordDescription,
       sampleValue: first.情绪关键词?.join('、')
     }
   ];
@@ -336,11 +601,13 @@ const aggregateByDimension = (
     const key = row[dimensionField];
     const rawValue = row[metricField];
     const numericValue =
-      typeof rawValue === 'number'
-        ? rawValue
-        : Array.isArray(rawValue)
-          ? rawValue.length
-          : Number(rawValue) || 0;
+      metricField === 'count'
+        ? 1
+        : typeof rawValue === 'number'
+          ? rawValue
+          : Array.isArray(rawValue)
+            ? rawValue.length
+            : Number(rawValue) || 0;
     const bucket = buckets.get(key) || { label: key, value: 0, count: 0 };
     bucket.value += numericValue;
     bucket.count += 1;
@@ -348,21 +615,153 @@ const aggregateByDimension = (
   });
   return Array.from(buckets.values()).map(item => ({
     label: item.label,
-    value: Number((item.value / (item.count || 1)).toFixed(2))
+    value:
+      metricField === 'count'
+        ? Number(item.value.toFixed(0))
+        : Number((item.value / (item.count || 1)).toFixed(2))
   }));
 };
 
+const buildSemanticProfile = (
+  notesSample: Array<{ title?: string; excerpt?: string }>,
+  fields: FieldDefinition[]
+) => {
+  const text = notesSample
+    .map(item => `${item.title || ''} ${item.excerpt || ''}`.trim())
+    .join('\n');
+  const chinese = text.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+  const english = text.match(/[A-Za-z]{4,}/g) || [];
+  const freq = new Map<string, number>();
+  [...chinese, ...english].forEach(token => {
+    const t = token.trim();
+    if (!t) return;
+    freq.set(t, (freq.get(t) || 0) + 1);
+  });
+  const keywords = Array.from(freq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([k]) => k);
+
+  return {
+    keywords,
+    field_names: fields.map(f => f.name).filter(Boolean)
+  };
+};
+
+const computeFieldStats = (dataset: AnalysisDatum[], fieldName: string) => {
+  const total = dataset.length || 1;
+  let missing = 0;
+  const counter = new Map<string, number>();
+  dataset.forEach(row => {
+    const v = (row as any)[fieldName];
+    if (v === null || v === undefined || v === '') {
+      missing += 1;
+      return;
+    }
+    const key = String(v);
+    counter.set(key, (counter.get(key) || 0) + 1);
+  });
+  const cardinality = counter.size;
+  const top = Array.from(counter.values()).sort((a, b) => b - a)[0] || 0;
+  const topShare = top / total;
+  return {
+    missing_rate: missing / total,
+    cardinality,
+    top_share: topShare
+  };
+};
+
+const normalizeSavedChartType = (chartType?: string): ChartType => {
+  if (chartType === 'line' || chartType === 'bar' || chartType === 'pie' || chartType === 'heatmap') {
+    return chartType;
+  }
+  return 'line';
+};
+
+const buildChartsFromSavedConfig = (
+  rawChartConfig: any,
+  fields: FieldDefinition[]
+): SavedChartConfigResult | null => {
+  if (!rawChartConfig || typeof rawChartConfig !== 'object') return null;
+
+  const idToNameMap: Record<string, string> = {};
+  fields.forEach(field => {
+    if (field.id) {
+      idToNameMap[field.id] = field.name;
+    }
+  });
+
+  const resolveFieldName = (value?: string): string => {
+    if (!value) return '';
+    return idToNameMap[value] || value;
+  };
+
+  const xFieldName = resolveFieldName(rawChartConfig.xAxisField);
+  const yFieldName = resolveFieldName(rawChartConfig.yAxisField);
+
+  if (!xFieldName || !yFieldName) {
+    return null;
+  }
+
+  const chartType = normalizeSavedChartType(rawChartConfig.chartType || rawChartConfig.type);
+  const title = rawChartConfig.title || '历史图表配置';
+
+  const candidateId = `saved-${chartType}-${xFieldName}-${yFieldName}`;
+
+  const candidate: ChartCandidate = {
+    id: candidateId,
+    title,
+    chartType,
+    icon:
+      chartType === 'line'
+        ? LineChartIcon
+        : chartType === 'bar'
+          ? BarChartIcon
+          : chartType === 'pie'
+            ? PieChartIcon
+            : HeatmapIcon,
+    reason: '基于上次保存的图表配置',
+    requiredDimensions: [xFieldName],
+    requiredMetrics: [yFieldName]
+  };
+
+  const instance: ChartInstance = {
+    id: `chart-saved-${Date.now()}`,
+    candidateId,
+    title,
+    chartType,
+    reason: '来自历史 AI 分析配置',
+    dimensionCandidates: [xFieldName],
+    metricCandidates: [yFieldName],
+    selectedDimension: xFieldName,
+    selectedMetric: yFieldName,
+    filters: [],
+    createdAt: Date.now()
+  };
+
+  return {
+    candidates: [candidate],
+    instances: [instance],
+    activeChartId: instance.id
+  };
+};
+
 const generateChartCandidates = (fields: FieldDefinition[], dataset: AnalysisDatum[]): ChartCandidate[] => {
-  if (!fields.length || !dataset.length) return [];
+  if (!Array.isArray(fields) || !fields.length) return [];
+  if (!Array.isArray(dataset) || !dataset.length) return [];
+
   const dimensionFields = fields.filter(field => field.role === 'dimension');
   const metricFields = fields.filter(field => field.role === 'metric');
-  if (!dimensionFields.length || !metricFields.length) return [];
 
+  if (!dimensionFields.length) return [];
+
+  // Step 1：按数据类型拆分维度字段
   const dateDimensions = dimensionFields.filter(field => field.dataType === 'date');
   const categoryDimensions = dimensionFields.filter(
     field => field.dataType === 'category' || field.dataType === 'text'
   );
-  const topMetrics = metricFields.slice(0, 3);
+
+  const hasMetric = metricFields.length > 0;
   const candidates: ChartCandidate[] = [];
   const usedIds = new Set<string>();
 
@@ -380,7 +779,9 @@ const generateChartCandidates = (fields: FieldDefinition[], dataset: AnalysisDat
     dimensionsRequired: string[],
     metricsRequired: string[]
   ) => {
-    if (!dimensionsRequired.length || !metricsRequired.length) return;
+    if (!Array.isArray(dimensionsRequired) || !dimensionsRequired.length) return;
+    // 折线图 / 柱状图 / 饼图 / 热力图都必须有数值字段或数量
+    if (!Array.isArray(metricsRequired) || !metricsRequired.length) return;
     const id = `${chartType}-${slug(uniqueKey)}`;
     if (usedIds.has(id)) return;
     usedIds.add(id);
@@ -395,26 +796,27 @@ const generateChartCandidates = (fields: FieldDefinition[], dataset: AnalysisDat
             ? BarChartIcon
             : chartType === 'pie'
               ? PieChartIcon
-              : chartType === 'area'
-                ? AreaChartIcon
-                : chartType === 'heatmap'
-                  ? HeatmapIcon
-                  : WordcloudIcon,
+              : HeatmapIcon,
       reason,
       requiredDimensions: dimensionsRequired,
       requiredMetrics: metricsRequired
     });
   };
 
-  // 趋势类：优先使用日期维度
-  if (dateDimensions.length) {
+  // 如果当前还没有任何数值字段，先不推荐图表
+  if (!hasMetric) return [];
+
+  const topMetrics = metricFields.slice(0, 3);
+
+  // ✅ 趋势关系：时间 + 数值 → 折线图
+  if (dateDimensions.length && metricFields.length) {
     dateDimensions.slice(0, 2).forEach(dim => {
       topMetrics.forEach(metric => {
         pushCandidate(
           `trend-${dim.name}-${metric.name}`,
           `${metric.name}趋势`,
           'line',
-          `跟踪 ${metric.name} 在 ${dim.name} 上的变化`,
+          `展示 ${metric.name} 随 ${dim.name} 的变化趋势`,
           [dim.name],
           [metric.name]
         );
@@ -422,8 +824,8 @@ const generateChartCandidates = (fields: FieldDefinition[], dataset: AnalysisDat
     });
   }
 
-  // 分类对比类
-  if (categoryDimensions.length) {
+  // ✅ 分类对比 / 构成：分类 + 数值 → 柱状图 / 饼图
+  if (categoryDimensions.length && metricFields.length) {
     categoryDimensions.slice(0, 2).forEach(dim => {
       topMetrics.forEach(metric => {
         pushCandidate(
@@ -436,48 +838,48 @@ const generateChartCandidates = (fields: FieldDefinition[], dataset: AnalysisDat
         );
       });
     });
+
     const pieDim = categoryDimensions[0];
     const pieMetric = topMetrics[0] || metricFields[0];
-    pushCandidate(
-      `distribution-${pieDim.name}-${pieMetric.name}`,
-      `${pieDim.name}占比`,
-      'pie',
-      `查看各 ${pieDim.name} 对 ${pieMetric.name} 的贡献`,
-      [pieDim.name],
-      [pieMetric.name]
-    );
+
+    // 类别数过多时不推荐饼图（只在类别在 2～8 之间时推荐）
+    const categorySet = new Set<string>();
+    dataset.forEach(row => {
+      const value = (row as any)[pieDim.name];
+      if (value !== undefined && value !== null && value !== '') {
+        categorySet.add(String(value));
+      }
+    });
+
+    if (categorySet.size >= 2 && categorySet.size <= 8) {
+      pushCandidate(
+        `distribution-${pieDim.name}-${pieMetric.name}`,
+        `${pieDim.name}占比`,
+        'pie',
+        `查看各 ${pieDim.name} 对 ${pieMetric.name} 的占比构成`,
+        [pieDim.name],
+        [pieMetric.name]
+      );
+    }
   }
 
-  // 多指标趋势
-  if (dateDimensions.length && metricFields.length > 1) {
-    const dim = dateDimensions[0];
-    const metricPair = metricFields.slice(0, 2);
-    pushCandidate(
-      `multi-${dim.name}-${metricPair.map(metric => metric.name).join('-')}`,
-      `${dim.name}多指标曲线`,
-      'area',
-      `在同一时间轴上比较 ${metricPair.map(metric => metric.name).join('、')} 的走势`,
-      [dim.name],
-      metricPair.map(metric => metric.name)
-    );
-  }
+  // ✅ 二维分布：两个分类 + 数值 → 热力图
+	  if (categoryDimensions.length >= 2 && metricFields.length) {
+	    const dimA = categoryDimensions[0];
+	    const dimB = categoryDimensions[1];
+	    const metric = metricFields[0];
+	    pushCandidate(
+	      `heatmap-${dimA.name}-${dimB.name}`,
+	      `${dimA.name}·${dimB.name}热力图`,
+	      'heatmap',
+	      `观察 ${dimA.name} 与 ${dimB.name} 组合下 ${metric.name} 的强度分布`,
+	      [dimA.name, dimB.name],
+	      [metric.name]
+	    );
+	  }
 
-  // 日期 + 分类 + 指标 => 热力图
-  if (dateDimensions.length && categoryDimensions.length && metricFields.length) {
-    const dimDate = dateDimensions[0];
-    const dimCategory = categoryDimensions[0];
-    const metric = metricFields[0];
-    pushCandidate(
-      `heatmap-${dimDate.name}-${dimCategory.name}`,
-      `${dimCategory.name}·${dimDate.name}热力图`,
-      'heatmap',
-      `观察 ${dimCategory.name} 在 ${dimDate.name} 维度上的表现强度`,
-      [dimDate.name, dimCategory.name],
-      [metric.name]
-    );
-  }
-
-  if (!candidates.length) {
+  // ✅ 兜底：任意维度 + 数值 → 柱状图概览
+  if (!candidates.length && dimensionFields.length && metricFields.length) {
     const fallbackDim = dimensionFields[0];
     const fallbackMetric = metricFields[0];
     pushCandidate(
@@ -533,11 +935,19 @@ const renderChartPreview = (
     return <div className="text-sm text-gray-500">暂无可视化数据</div>;
   }
 
-  const [dimension] = chart.dimensions;
-  const [metric] = chart.metrics;
+  const [legacyDimension] = (chart as any).dimensions || [];
+  const [legacyMetric] = (chart as any).metrics || [];
+  const dimension =
+    chart.selectedDimension ??
+    chart.dimensionCandidates?.[0] ??
+    legacyDimension;
+  const metric =
+    chart.selectedMetric ??
+    chart.metricCandidates?.[0] ??
+    legacyMetric;
 
   if (!dimension || !metric) {
-    return <div className="text-sm text-gray-500">请先勾选维度和指标</div>;
+    return <div className="text-sm text-gray-500">请先勾选X轴和Y轴</div>;
   }
 
   if (chart.chartType === 'wordcloud') {
@@ -586,12 +996,96 @@ const renderChartPreview = (
   }
 
   if (chart.chartType === 'area' || chart.chartType === 'heatmap') {
-    const sorted = [...dataset]
-      .sort((a, b) => a.日期原始.getTime() - b.日期原始.getTime())
-      .map(item => ({
-        label: item[dimension],
-        value: item[metric]
-      }));
+    if (chart.chartType === 'heatmap') {
+      const dim2 = (chart as any).selectedDimension2 ?? (chart as any).dimension2Candidates?.[0];
+      if (!dim2) {
+        return <div className="text-sm text-gray-500">请先选择热力图的第二维度</div>;
+      }
+      // 简单热力图：二维表格 + 强度颜色
+      const xVals: string[] = [];
+      const yVals: string[] = [];
+      const xSet = new Set<string>();
+      const ySet = new Set<string>();
+      const cell = new Map<string, number>();
+      dataset.forEach((row) => {
+        const a = (row as any)[dimension];
+        const b = (row as any)[dim2];
+        if (a === undefined || a === null || a === '') return;
+        if (b === undefined || b === null || b === '') return;
+        const xa = String(a);
+        const yb = String(b);
+        if (!xSet.has(xa)) {
+          xSet.add(xa);
+          xVals.push(xa);
+        }
+        if (!ySet.has(yb)) {
+          ySet.add(yb);
+          yVals.push(yb);
+        }
+        const key = `${xa}|||${yb}`;
+        const raw = metric === 'count' ? 1 : Number((row as any)[metric]) || 0;
+        cell.set(key, (cell.get(key) || 0) + raw);
+      });
+      const values = Array.from(cell.values());
+      const max = values.length ? Math.max(...values) : 1;
+      const min = values.length ? Math.min(...values) : 0;
+      const normalize = (v: number) => {
+        if (max === min) return 0.5;
+        return (v - min) / (max - min);
+      };
+      const color = (t: number) => {
+        // 绿色系
+        const alpha = 0.1 + t * 0.75;
+        return `rgba(6, 195, 168, ${alpha})`;
+      };
+      return (
+        <div className="h-[260px] overflow-auto rounded-xl border border-gray-100 bg-white">
+          <table className="min-w-max w-full text-xs border-collapse">
+            <thead>
+              <tr>
+                <th className="sticky left-0 top-0 z-10 bg-white border border-gray-100 px-2 py-2 text-gray-500">
+                  {dimension} \\ {dim2}
+                </th>
+                {yVals.map((yv) => (
+                  <th key={yv} className="sticky top-0 z-0 bg-white border border-gray-100 px-2 py-2 text-gray-500">
+                    {yv}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {xVals.map((xv) => (
+                <tr key={xv}>
+                  <td className="sticky left-0 bg-white border border-gray-100 px-2 py-2 text-gray-700 font-medium">
+                    {xv}
+                  </td>
+                  {yVals.map((yv) => {
+                    const v = cell.get(`${xv}|||${yv}`) || 0;
+                    const t = normalize(v);
+                    return (
+                      <td
+                        key={`${xv}-${yv}`}
+                        className="border border-gray-100 px-2 py-2 text-center text-gray-800"
+                        style={{ background: v ? color(t) : 'transparent' }}
+                        title={`${xv} / ${yv}: ${v}`}
+                      >
+                        {v ? (metric === 'count' ? v.toFixed(0) : v.toFixed(2)) : ''}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    const sorted = aggregateByDimension(
+      [...dataset].sort((a, b) => a.日期原始.getTime() - b.日期原始.getTime()),
+      dimension,
+      metric
+    );
     return (
       <ResponsiveContainer width="100%" height={260}>
         <AreaChart data={sorted}>
@@ -605,12 +1099,11 @@ const renderChartPreview = (
     );
   }
 
-  const sorted = [...dataset]
-    .sort((a, b) => a.日期原始.getTime() - b.日期原始.getTime())
-    .map(item => ({
-      label: item[dimension],
-      value: item[metric]
-    }));
+  const sorted = aggregateByDimension(
+    [...dataset].sort((a, b) => a.日期原始.getTime() - b.日期原始.getTime()),
+    dimension,
+    metric
+  );
 
   return (
     <ResponsiveContainer width="100%" height={260}>
@@ -622,6 +1115,217 @@ const renderChartPreview = (
         <Line type="monotone" dataKey="value" stroke="#6366F1" strokeWidth={2} dot />
       </LineChart>
     </ResponsiveContainer>
+  );
+};
+
+const inferCandidateChartType = (candidateId?: string): ChartType | null => {
+  const id = String(candidateId || '').trim();
+  if (!id) return null;
+  const tryType = (value: string) => {
+    const t = value as ChartType;
+    return t === 'line' || t === 'bar' || t === 'pie' || t === 'area' || t === 'heatmap' || t === 'wordcloud'
+      ? t
+      : null;
+  };
+  if (id.startsWith('v3-')) {
+    return tryType(id.split('-')[1] || '');
+  }
+  if (id.startsWith('saved-')) {
+    return tryType(id.split('-')[1] || '');
+  }
+  return tryType(id.split('-')[0] || '');
+};
+
+interface DraggableFieldListItemProps {
+  field: FieldDefinition;
+  onDelete: () => void;
+}
+
+const DraggableFieldListItem = ({ field, onDelete }: DraggableFieldListItemProps) => {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `field-${field.id}`,
+    data: {
+      fieldName: field.name,
+      role: field.role,
+      origin: 'field-list'
+    }
+  });
+
+  const style = transform
+    ? {
+        transform: CSS.Translate.toString(transform)
+      }
+    : undefined;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className={`relative rounded-2xl border border-[#90dfcb] bg-white px-4 py-2 shadow-sm transition-all ${
+        isDragging ? 'ring-2 ring-[#43ccb0] shadow-lg scale-[1.01]' : ''
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onDelete}
+        onPointerDown={event => event.stopPropagation()}
+        className="absolute right-3 top-2 rounded-full border border-transparent px-2 text-xs text-gray-400 hover:text-red-500 hover:border-red-200 transition-colors"
+        aria-label="删除字段"
+      >
+        ×
+      </button>
+      <div className="flex flex-col pr-6 gap-1">
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-gray-900 text-xs">{field.name}</span>
+          {field.source === 'notebook' && (
+            <span className="rounded-full border border-[#90dfcb] bg-[#effdf8] px-2 py-0.5 text-[11px] text-[#0a917a]">
+              现有字段
+            </span>
+          )}
+          {field.source === 'system' && (
+            <span className="rounded-full border border-[#90dfcb] bg-[#effdf8] px-2 py-0.5 text-[11px] text-[#0a917a]">
+              AI生成
+            </span>
+          )}
+          {field.source === 'ai-temp' && (
+            <span className="rounded-full border border-[#90dfcb] bg-[#effdf8] px-2 py-0.5 text-[11px] text-[#0a917a]">
+              AI 生成
+            </span>
+          )}
+          {field.source === 'custom' && (
+            <span className="rounded-full border border-[#90dfcb] bg-[#effdf8] px-2 py-0.5 text-[11px] text-[#0a917a]">
+              自定义
+            </span>
+          )}
+        </div>
+        {field.description && <span className="text-[11px] text-gray-400">{field.description}</span>}
+      </div>
+    </div>
+  );
+};
+
+interface AxisCandidatePillProps {
+  fieldName: string;
+  slot: AxisSlot;
+  role: FieldRole;
+  selected: boolean;
+  radioGroupName: string;
+  onSelect: () => void;
+  onRemove: () => void;
+}
+
+const AxisCandidatePill = ({ fieldName, slot, role, selected, radioGroupName, onSelect, onRemove }: AxisCandidatePillProps) => {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `axis-${slot}-${fieldName}`,
+    data: {
+      fieldName,
+      role,
+      origin: 'axis',
+      axisSlot: slot
+    }
+  });
+
+  const style = transform
+    ? {
+        transform: CSS.Translate.toString(transform)
+      }
+    : undefined;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className={`flex items-center justify-between gap-2 rounded-2xl border px-3 py-2 text-xs transition-all ${
+        selected ? 'border-[#06c3a8] bg-[#f0fffa] text-[#065f4f]' : 'border-gray-200 bg-white text-gray-700'
+      } ${isDragging ? 'shadow-lg' : ''}`}
+    >
+      <label className="flex flex-1 items-center gap-2 cursor-pointer select-none">
+        <input
+          type="radio"
+          checked={selected}
+          onChange={onSelect}
+          name={radioGroupName}
+          className="sr-only"
+        />
+        <span
+          className={`flex h-4 w-4 items-center justify-center rounded border text-[10px] ${
+            selected ? 'border-[#06c3a8] bg-[#06c3a8] text-white' : 'border-gray-300 bg-white text-transparent'
+          }`}
+        >
+          <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2}>
+            <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span className="truncate">{fieldName}</span>
+      </label>
+      <button
+        type="button"
+        onClick={onRemove}
+        onPointerDown={event => event.stopPropagation()}
+        className="text-gray-400 hover:text-red-500"
+        aria-label="移除字段"
+      >
+        ×
+      </button>
+    </div>
+  );
+};
+
+interface AxisDropZoneProps {
+  axisSlot: AxisSlot;
+  candidates: string[];
+  selectedField: string | null;
+  radioGroupName: string;
+  emptyHint: string;
+  onSelect: (fieldName: string, slot: AxisSlot) => void;
+  onRemove: (fieldName: string, slot: AxisSlot) => void;
+}
+
+const AxisDropZone = ({
+  axisSlot,
+  candidates,
+  selectedField,
+  radioGroupName,
+  emptyHint,
+  onSelect,
+  onRemove
+}: AxisDropZoneProps) => {
+  const dropId =
+    axisSlot === 'dimension'
+      ? AXIS_DROP_TARGET_IDS.dimension
+      : axisSlot === 'dimension2'
+        ? AXIS_DROP_TARGET_IDS.dimension2
+        : AXIS_DROP_TARGET_IDS.metric;
+  const { setNodeRef, isOver } = useDroppable({ id: dropId });
+  return (
+    <div
+      ref={setNodeRef}
+      className={`space-y-2 rounded-2xl border border-dashed px-3 py-3 transition-colors ${
+        isOver ? 'border-[#43ccb0] bg-[#effdf8]' : 'border-gray-100 bg-gray-50/40'
+      }`}
+    >
+      {candidates && candidates.length > 0 ? (
+        candidates.map(candidate => (
+          <AxisCandidatePill
+            key={`${axisSlot}-${candidate}`}
+            fieldName={candidate}
+            slot={axisSlot}
+            role={axisSlot === 'metric' ? 'metric' : 'dimension'}
+            radioGroupName={radioGroupName}
+            selected={selectedField === candidate}
+            onSelect={() => onSelect(candidate, axisSlot)}
+            onRemove={() => onRemove(candidate, axisSlot)}
+          />
+        ))
+      ) : (
+        <p className="text-[12px] text-gray-400 text-center py-4">{emptyHint}</p>
+      )}
+      <p className="text-[11px] text-gray-400 text-center">拖出或点击 × 可移除，最多 5 个</p>
+    </div>
   );
 };
 
@@ -637,12 +1341,15 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stage, setStage] = useState<AnalysisStage>('idle');
+  const [stageMessage, setStageMessage] = useState('');
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [notes, setNotes] = useState<Array<Note & Record<string, any>>>([]);
   const [fields, setFields] = useState<FieldDefinition[]>([]);
   const [aiFields, setAiFields] = useState<FieldDefinition[]>([]);
   const [dataset, setDataset] = useState<AnalysisDatum[]>([]);
   const [chartCandidates, setChartCandidates] = useState<ChartCandidate[]>([]);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [chartInstances, setChartInstances] = useState<ChartInstance[]>([]);
   const [activeChartId, setActiveChartId] = useState<string | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'analyzing' | 'ready'>('idle');
@@ -664,6 +1371,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   });
   const [columnWidths, setColumnWidths] = useState<[number, number, number]>([34, 33, 33]);
   const [isDesktop, setIsDesktop] = useState(false);
+  const [noteSettingsExpanded, setNoteSettingsExpanded] = useState(true);
   const [configExpanded, setConfigExpanded] = useState(true);
   const [aiPanelExpanded, setAiPanelExpanded] = useState(true);
   const [promptTemplates, setPromptTemplates] = useState<Array<{ id: string; title: string; content: string }>>([
@@ -693,6 +1401,19 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   const notebookTriggerRef = useRef<HTMLButtonElement | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const [notebookMenuPos, setNotebookMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [customFieldModalOpen, setCustomFieldModalOpen] = useState(false);
+  const [customFieldName, setCustomFieldName] = useState('');
+  const [customFieldRole, setCustomFieldRole] = useState<FieldRole>('dimension');
+  const [customFieldSubmitting, setCustomFieldSubmitting] = useState(false);
+  const [pendingDeleteField, setPendingDeleteField] = useState<FieldDefinition | null>(null);
+  const [deleteFieldSubmitting, setDeleteFieldSubmitting] = useState(false);
+  const [aiCandidateDropdownOpen, setAiCandidateDropdownOpen] = useState(false);
+  const aiCandidateDropdownRef = useRef<HTMLDivElement | null>(null);
+  const aiCandidateTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const aiCandidateMenuRef = useRef<HTMLDivElement | null>(null);
+  const [aiCandidateMenuPos, setAiCandidateMenuPos] = useState<{ top: number; left: number; width: number } | null>(
+    null
+  );
   const columnsContainerRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
     handleIndex: 0 | 1;
@@ -700,7 +1421,20 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
     startWidths: [number, number, number];
     containerWidth: number;
   } | null>(null);
-
+  const sensors = useSensors(
+    useSensor(MouseSensor, {
+      activationConstraint: {
+        distance: 6
+      }
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 120,
+        tolerance: 5
+      }
+    })
+  );
+  const lastRunKeyRef = useRef<string>('');
   const notebookIdFromRoute = notebookIdParam || noteid || null;
   const notebookId = notebookIdOverride || notebookIdFromRoute;
 
@@ -758,16 +1492,49 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
       ) {
         setNotebookDropdownOpen(false);
       }
+
+      if (
+        aiCandidateDropdownRef.current &&
+        !aiCandidateDropdownRef.current.contains(event.target as Node) &&
+        (!aiCandidateMenuRef.current || !aiCandidateMenuRef.current.contains(event.target as Node))
+      ) {
+        setAiCandidateDropdownOpen(false);
+      }
     };
 
-    if (notebookDropdownOpen) {
+    if (notebookDropdownOpen || aiCandidateDropdownOpen) {
       document.addEventListener('mousedown', handleClickOutside);
     }
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [notebookDropdownOpen]);
+  }, [notebookDropdownOpen, aiCandidateDropdownOpen]);
+
+  const updateAiCandidateMenuPos = useCallback(() => {
+    if (!aiCandidateTriggerRef.current) return;
+    const rect = aiCandidateTriggerRef.current.getBoundingClientRect();
+    setAiCandidateMenuPos({
+      top: rect.bottom + 8,
+      left: rect.left,
+      width: rect.width
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!aiCandidateDropdownOpen) {
+      setAiCandidateMenuPos(null);
+      return;
+    }
+    updateAiCandidateMenuPos();
+    const handler = () => updateAiCandidateMenuPos();
+    window.addEventListener('resize', handler);
+    window.addEventListener('scroll', handler, true);
+    return () => {
+      window.removeEventListener('resize', handler);
+      window.removeEventListener('scroll', handler, true);
+    };
+  }, [aiCandidateDropdownOpen, updateAiCandidateMenuPos]);
 
   useEffect(() => {
     if (!notebookDropdownOpen) {
@@ -920,6 +1687,89 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
     return trimmed;
   };
 
+  const handleCreateCustomAiField = useCallback(async () => {
+    if (!notebookId) {
+      alert('请先选择笔记本');
+      return;
+    }
+    const analysisNotes =
+      selectedNoteIds.length > 0
+        ? notes.filter(note => selectedNoteIds.includes(String(resolveNoteId(note))))
+        : [];
+    if (!analysisNotes.length) {
+      alert('请先在上方勾选需要分析的笔记');
+      return;
+    }
+
+    const trimmedName = customFieldName.trim();
+    if (!trimmedName) {
+      alert('请输入字段名称');
+      return;
+    }
+
+    const exists = allFields.some(field => field.name === trimmedName);
+    if (exists) {
+      alert('已存在同名字段，请更换名称');
+      return;
+    }
+
+    try {
+      setCustomFieldSubmitting(true);
+      const noteIdsForAI = analysisNotes
+        .map(note => String(resolveNoteId(note)))
+        .filter(Boolean);
+      const response = await apiClient.post(`/api/notebooks/${notebookId}/custom-ai-field`, {
+        fieldName: trimmedName,
+        fieldRole: customFieldRole,
+        noteIds: noteIdsForAI
+      });
+      const payload = (response as any)?.data?.data || (response as any)?.data || {};
+      const fieldMeta = payload.field || {};
+      const values: Record<string, any> = payload.values || {};
+
+      const finalName: string = fieldMeta.name || trimmedName;
+      const finalRole: FieldRole =
+        fieldMeta.role === 'metric' || fieldMeta.role === 'dimension'
+          ? fieldMeta.role
+          : customFieldRole;
+      const finalDataType: FieldDataType =
+        fieldMeta.dataType && ['date', 'number', 'text', 'category'].includes(fieldMeta.dataType)
+          ? fieldMeta.dataType
+          : finalRole === 'metric'
+            ? 'number'
+            : 'text';
+
+      const newField: FieldDefinition = {
+        id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: finalName,
+        role: finalRole,
+        dataType: finalDataType,
+        source: 'custom',
+        description: fieldMeta.description || 'AI 基于所选笔记生成的自定义字段'
+      };
+
+      setAiFields(prev => [...prev, newField]);
+      setDataset(prev =>
+        prev.map(row => {
+          const key = String(row.id);
+          const value = values[key];
+          return {
+            ...row,
+            [finalName]: value !== undefined ? value : row[finalName]
+          };
+        })
+      );
+      setCustomFieldModalOpen(false);
+      setCustomFieldName('');
+      setCustomFieldRole('dimension');
+    } catch (error: any) {
+      console.error('生成自定义字段失败:', error);
+      alert(error?.message || '生成自定义字段失败，请稍后重试');
+    } finally {
+      setCustomFieldSubmitting(false);
+    }
+  }, [allFields, customFieldName, customFieldRole, notebookId, notes, selectedNoteIds, resolveNoteId, setDataset, setAiFields]);
+
   const getNoteFieldValue = useCallback(
     (note: any, field: FieldDefinition) => {
       if (!note) return '';
@@ -945,7 +1795,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
         }
       }
 
-      if (field.source === 'system') {
+      if (field.source === 'system' || field.source === 'custom' || field.source === 'ai-temp') {
         const datasetRow = datasetByNoteId.get(String(resolveNoteId(note)));
         if (datasetRow && (datasetRow as any)[field.name] !== undefined) {
           const raw = (datasetRow as any)[field.name];
@@ -976,12 +1826,15 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
       // 清空当前数据，进入“未选择笔记本”的空状态
       setLoading(false);
       setError(null);
+      setStage('idle');
+      setStageMessage('');
       setNotebook(null);
       setNotes([]);
       setFields([]);
       setAiFields([]);
       setDataset([]);
       setChartCandidates([]);
+      setSelectedCandidateId(null);
       setChartInstances([]);
       setActiveChartId(null);
       setAnalysisStatus('idle');
@@ -989,6 +1842,8 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
     }
     setLoading(true);
     setError(null);
+    setStage('loading');
+    setStageMessage('加载笔记与字段...');
     try {
       const noteResponse = await apiClient.getNotes(notebookId);
       const notebookInfo: Notebook | null = noteResponse?.notebook ?? null;
@@ -1032,13 +1887,15 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
         setAiFields([]);
         setDataset([]);
         setChartCandidates([]);
+        setSelectedCandidateId(null);
         setChartInstances([]);
         setActiveChartId(null);
         setBootstrapped(false);
         setAnalysisStatus('idle');
+        setStage('idle');
+        setStageMessage('');
         return;
       }
-      setAnalysisStatus('analyzing');
 
       const parsedInstances: ComponentInstance[] = parseNotebookComponentConfig(
         notebookDetail?.component_config ?? notebookInfo?.component_config ?? null
@@ -1053,10 +1910,10 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
       });
       setFieldNameToIdMap(nameToIdMapping);
 
-      const existingFields: FieldDefinition[] = parsedInstances.map(instance => {
-        const meta = componentRoleMap[instance.type] ?? { role: 'dimension', dataType: 'text' };
-        return {
-          id: instance.id,
+	      const existingFields: FieldDefinition[] = parsedInstances.map(instance => {
+	        const meta = componentRoleMap[instance.type] ?? { role: 'dimension', dataType: 'text' };
+	        return {
+	          id: instance.id,
           name: instance.title || instance.type || '未命名字段',
           role: meta.role,
           dataType: meta.dataType,
@@ -1065,49 +1922,310 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
         };
       });
 
-      // 向后端请求 AI 字段（增量补齐）
-      let aiFieldValues: Record<string, Record<string, any>> | undefined;
-      try {
-        const noteIdsForAI = analysisNotes
-          .map(note => String(resolveNoteId(note)))
-          .filter(Boolean);
-        if (noteIdsForAI.length && notebookId) {
-          const response = await apiClient.post(`/api/notebooks/${notebookId}/ai-fields`, {
-            noteIds: noteIdsForAI,
-            fieldKeys: ['mood_score', 'mood_category', 'mood_source', 'mood_keywords'],
-            promptTemplateId: currentTemplateId
-          });
-          const payload = response.data?.data || response.data;
-          if (payload?.values && typeof payload.values === 'object') {
-            aiFieldValues = payload.values as Record<string, Record<string, any>>;
-          }
-        }
-      } catch (aiError) {
-        console.warn('[AnalysisSettingV2] 获取 AI 字段失败，将使用前端推断值:', aiError);
+      const currentRunKey = buildRunKey({
+        notebookId,
+        noteIds: analysisNotes.map(note => String(resolveNoteId(note))).filter(Boolean),
+        dateRange: noteFilterDateRange,
+        templateId: currentTemplateId
+      });
+
+      // 若本次条件未变化，则直接复用当前页面状态（不重复调用 AI）
+      if (lastRunKeyRef.current === currentRunKey) {
+        setLoading(false);
+        return;
       }
 
-      const generatedDataset = buildAnalysisDataset(analysisNotes, aiFieldValues);
+      // 结束“加载笔记与字段”的全屏 loading，后续阶段用局部遮罩提示
+      setLoading(false);
+
+      // Step 0：构建基础数据集（仅来自模板字段 + 系统基础字段，不依赖旧的 mood_*）
+      const generatedDataset = buildAnalysisDataset(analysisNotes, undefined, {
+        fields: existingFields,
+        fieldNameToIdMap: nameToIdMapping
+      });
       generatedDataset.sort((a, b) => a.日期原始.getTime() - b.日期原始.getTime());
 
-      const systemFields = buildSystemFields(generatedDataset).filter(
+      const systemFields = buildSystemFields(
+        generatedDataset,
+        (notebookDetail as Notebook | null)?.type ?? notebookInfo?.type ?? null
+      ).filter(
         field => !existingFields.some(item => item.name === field.name)
       );
 
-      setFields([...existingFields, ...systemFields]);
-      setAiFields([]);
+      const baseFields = [...existingFields, ...systemFields];
+      const notesSample = analysisNotes.slice(0, 24).map(note => {
+        const id = String(resolveNoteId(note));
+        const title = note.title || '';
+        const excerpt = String(note.content_text || note.content || '').slice(0, 220);
+        const created_at = note.created_at || note.updated_at || '';
+        return { id, title, excerpt, created_at };
+      });
+      const semanticProfile = buildSemanticProfile(notesSample, baseFields);
+
+      // Phase 1: 推荐模式（Prompt 1）
+      setAnalysisStatus('analyzing');
+      setStage('recommending');
+      setStageMessage('AI正在竭力为您分析...');
+      const recommendResp = await apiClient.recommendAIChart({
+        fields: baseFields.map(f => ({
+          name: f.name,
+          role: f.role,
+          data_type: f.dataType,
+          source: f.source,
+          example: f.sampleValue
+        })),
+        notes_sample: notesSample,
+        semantic_profile: semanticProfile,
+        policy_overrides: AI_CHART_POLICY_OVERRIDES as any,
+        fixed_vocabularies: AI_CHART_FIXED_VOCABULARIES as any
+      });
+      const recommendData = recommendResp?.data || {};
+      const recommendedChartType: 'line' | 'bar' | 'pie' | 'heatmap' =
+        ['line', 'bar', 'pie', 'heatmap'].includes(recommendData.chart_type) ? recommendData.chart_type : 'bar';
+      const fieldPlan = recommendData.field_plan || {};
+      const missingFields: any[] = Array.isArray(fieldPlan.missing_fields) ? fieldPlan.missing_fields : [];
+
+      // Phase 2: 缺口字段生成（Prompt 2）
+      const generatedAiFields: FieldDefinition[] = [];
+      if (missingFields.length > 0) {
+        setStage('deriving_fields');
+        setStageMessage('AI 正在生成图表所需字段...');
+        const deriveResp = await apiClient.deriveAIChartFields({
+          missing_fields: missingFields,
+          notes: analysisNotes.slice(0, 220).map(note => ({
+            id: String(resolveNoteId(note)),
+            title: note.title || '',
+            excerpt: String(note.content_text || note.content || '').slice(0, 400)
+          })),
+          policy_overrides: AI_CHART_POLICY_OVERRIDES as any,
+          fixed_vocabularies: AI_CHART_FIXED_VOCABULARIES as any
+        });
+        const deriveData = deriveResp?.data || {};
+        const fieldValues = deriveData.field_values && typeof deriveData.field_values === 'object' ? deriveData.field_values : {};
+
+        // 写入 dataset
+        const byId = new Map<string, any>();
+        generatedDataset.forEach(row => byId.set(String(row.id), row));
+        Object.keys(fieldValues).forEach((fieldName) => {
+          const map = fieldValues[fieldName] || {};
+          Object.keys(map).forEach((noteId) => {
+            const row = byId.get(String(noteId));
+            if (row) {
+              (row as any)[fieldName] = map[noteId];
+            }
+          });
+        });
+
+        // 生成 aiFields 定义
+        missingFields.forEach((mf) => {
+          const name = String(mf?.name || '').trim();
+          if (!name) return;
+          const role: FieldRole = mf?.role === 'metric' ? 'metric' : 'dimension';
+          const dt: FieldDataType =
+            mf?.data_type === 'number'
+              ? 'number'
+              : mf?.data_type === 'date'
+                ? 'date'
+                : mf?.data_type === 'category'
+                  ? 'category'
+                  : 'text';
+          generatedAiFields.push({
+            id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name,
+            role,
+            dataType: dt,
+            source: 'ai-temp',
+            description: mf?.meaning || mf?.explain_template || 'AI 生成字段'
+          });
+        });
+      }
+
+      // 更新字段表 + 数据集
+      setFields(baseFields);
+      setAiFields(generatedAiFields);
       setDataset(generatedDataset);
 
-      const candidates = generateChartCandidates([...existingFields, ...systemFields], generatedDataset);
+      const allFieldsNow = [...baseFields, ...generatedAiFields];
+      const allFieldNames = new Set(allFieldsNow.map(f => f.name));
+
+      // Phase 3: 字段择优（Prompt 1.5，条件触发）
+      const timeCandidates = (fieldPlan.time_field_candidates || [])
+        .map((c: any) => c?.name)
+        .filter(Boolean)
+        .filter((n: string) => allFieldNames.has(n));
+      const dimensionCandidates = (fieldPlan.dimension_candidates || [])
+        .map((c: any) => c?.name)
+        .filter(Boolean)
+        .filter((n: string) => allFieldNames.has(n));
+      const metricCandidates = (fieldPlan.metric_candidates || [])
+        .map((c: any) => c?.name)
+        .filter(Boolean)
+        .filter((n: string) => n === 'count' || allFieldNames.has(n));
+
+      const gates = (AI_CHART_POLICY_OVERRIDES as any).gates || {};
+      const filterByMissing = (names: string[]) =>
+        names.filter((n) => {
+          if (n === 'count') return true;
+          const s = computeFieldStats(generatedDataset, n);
+          return s.missing_rate <= (gates.field_max_missing_rate ?? 0.4);
+        });
+
+      const filteredTime = filterByMissing(timeCandidates);
+      const filteredDim = filterByMissing(dimensionCandidates);
+      const filteredMetric = filterByMissing(metricCandidates);
+
+      const needRerank =
+        filteredTime.length + filteredDim.length + filteredMetric.length >= 4 ||
+        filteredTime.length > 1 ||
+        filteredDim.length > 1 ||
+        filteredMetric.length > 1;
+
+      let selected = {
+        timeField: String(fieldPlan?.selected?.time_field || ''),
+        dimensionField: String(fieldPlan?.selected?.dimension || ''),
+        dimensionField2: '',
+        metricField: String(fieldPlan?.selected?.metric || ''),
+        aggregation: String(fieldPlan?.aggregation || 'count'),
+        timeGranularity: String(fieldPlan?.time_granularity || 'none')
+      };
+
+      if (needRerank) {
+        setStage('reranking');
+        setStageMessage('AI 正在从候选字段中择优...');
+        const stats: Record<string, any> = {};
+        [...new Set([...filteredTime, ...filteredDim, ...filteredMetric].filter((n) => n !== 'count'))].forEach((name) => {
+          stats[name] = computeFieldStats(generatedDataset, name);
+        });
+        const rerankResp = await apiClient.rerankAIChartFields({
+          chart_type: recommendedChartType,
+          candidate_fields: {
+            time: filteredTime,
+            dimension: filteredDim,
+            metric: filteredMetric
+          },
+          field_stats: stats,
+          semantic_profile: semanticProfile,
+          policy_overrides: AI_CHART_POLICY_OVERRIDES as any,
+          fixed_vocabularies: AI_CHART_FIXED_VOCABULARIES as any
+        });
+        const rerankData = rerankResp?.data || {};
+        const sf = rerankData.selected_fields || {};
+        selected = {
+          timeField: String(sf.time_field || selected.timeField || ''),
+          dimensionField: String(sf.dimension_field || selected.dimensionField || ''),
+          dimensionField2: String(sf.dimension_field_2 || ''),
+          metricField: String(sf.metric_field || selected.metricField || ''),
+          aggregation: String(sf.aggregation || selected.aggregation || 'count'),
+          timeGranularity: String(sf.time_granularity || selected.timeGranularity || 'none')
+        };
+      }
+
+      // Phase 4: Gates（质量门槛与降级）
+      const gateResult = applyChartGates({
+        chartType: recommendedChartType,
+        dataset: generatedDataset,
+        selected,
+        gates: (AI_CHART_POLICY_OVERRIDES as any).gates
+      });
+      const finalChartType = gateResult.chartType;
+
+      const aiBaseReason = [recommendData.why, gateResult.reason].filter(Boolean).join('；') || 'AI 推荐';
+
+      const getXFieldForType = (chartType: ChartType) => {
+        if (chartType === 'line') {
+          return selected.timeField || filteredTime[0] || filteredDim[0] || systemFields[0]?.name || '';
+        }
+        if (chartType === 'heatmap') {
+          return selected.dimensionField || filteredDim[0] || filteredTime[0] || systemFields[0]?.name || '';
+        }
+        return selected.dimensionField || filteredDim[0] || filteredTime[0] || systemFields[0]?.name || '';
+      };
+
+      const getSecondDimForHeatmap = () => {
+        return selected.dimensionField2 || filteredDim[1] || filteredTime[1] || '';
+      };
+
+      const yField = selected.metricField || filteredMetric[0] || 'count';
+
+      const makeCandidateVariant = (chartType: ChartType, isAiRecommended: boolean): ChartCandidate => {
+        const xField = getXFieldForType(chartType);
+        const heatmapSecondDim = chartType === 'heatmap' ? getSecondDimForHeatmap() : '';
+        const requiredDimensions =
+          chartType === 'heatmap'
+            ? [xField, heatmapSecondDim].filter(Boolean)
+            : xField
+              ? [xField]
+              : [];
+
+        const suffix = isAiRecommended
+          ? 'AI 推荐'
+          : `可切换为${CHART_TYPE_LABELS[chartType] || chartType}查看同一组字段的不同视图`;
+
+        return {
+          id: `v3-${chartType}-${requiredDimensions.join('|')}-${yField}`,
+          title: recommendData.core_question || recommendData.title || 'AI 推荐图表',
+          chartType,
+          icon:
+            chartType === 'line'
+              ? LineChartIcon
+              : chartType === 'bar'
+                ? BarChartIcon
+                : chartType === 'pie'
+                  ? PieChartIcon
+                  : HeatmapIcon,
+          reason: [aiBaseReason, suffix].filter(Boolean).join('；'),
+          requiredDimensions,
+          requiredMetrics: yField ? [yField] : []
+        };
+      };
+
+      const allChartTypes: ChartType[] = ['line', 'bar', 'pie', 'heatmap'];
+      const aiCandidate = makeCandidateVariant(finalChartType, true);
+      const extraCandidates = allChartTypes
+        .filter(type => type !== finalChartType)
+        .map(type => makeCandidateVariant(type, false));
+      const candidates = [aiCandidate, ...extraCandidates];
+
+      const ensuredForInstance = ensureFieldsForCandidate(aiCandidate);
+      const initialDimensionCandidates = ensuredForInstance.dimensions.slice(0, 5);
+      const initialMetricCandidates = ensuredForInstance.metrics.slice(0, 5);
+      const isHeatmap = aiCandidate.chartType === 'heatmap';
+      const instanceDimensionCandidates = isHeatmap ? initialDimensionCandidates.slice(0, 1) : initialDimensionCandidates;
+      const instanceDimension2Candidates = isHeatmap ? initialDimensionCandidates.slice(1, 2) : [];
+
+      const instance: ChartInstance = {
+        id: `chart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        candidateId: aiCandidate.id,
+        title: aiCandidate.title,
+        chartType: aiCandidate.chartType,
+        reason: aiCandidate.reason,
+        dimensionCandidates: instanceDimensionCandidates,
+        dimension2Candidates: instanceDimension2Candidates,
+        metricCandidates: initialMetricCandidates,
+        selectedDimension: instanceDimensionCandidates[0] ?? null,
+        selectedDimension2: instanceDimension2Candidates[0] ?? null,
+        selectedMetric: initialMetricCandidates[0] ?? null,
+        filters: [],
+        createdAt: Date.now()
+      };
+
       setChartCandidates(candidates);
-      setChartInstances([]);
-      setActiveChartId(null);
-      setBootstrapped(false);
+      setSelectedCandidateId(aiCandidate.id);
+      setChartInstances([instance]);
+      setActiveChartId(instance.id);
+      setBootstrapped(true);
       setAnalysisStatus('ready');
+      setStage('ready');
+      setStageMessage('');
+      lastRunKeyRef.current = currentRunKey;
     } catch (fetchError: any) {
       console.error('加载分析数据失败', fetchError);
       setError(fetchError.message || '加载分析数据失败');
       setAnalysisStatus('idle');
+      setStage('error');
+      setStageMessage(fetchError.message || '加载分析数据失败');
     } finally {
+      // 若仍处于 loading（异常中断时），确保关闭
       setLoading(false);
     }
   }, [notebookId, selectedNoteIds, noteFilterDateRange, currentTemplateId]);
@@ -1162,14 +2280,23 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   const handleAddChart = useCallback(
     (candidate: ChartCandidate, auto = false) => {
       const ensured = ensureFieldsForCandidate(candidate);
+      const initialDimensionCandidates = ensured.dimensions.slice(0, 5);
+      const initialMetricCandidates = ensured.metrics.slice(0, 5);
+      const isHeatmap = candidate.chartType === 'heatmap';
+      const dimensionCandidates = isHeatmap ? initialDimensionCandidates.slice(0, 1) : initialDimensionCandidates;
+      const dimension2Candidates = isHeatmap ? initialDimensionCandidates.slice(1, 2) : [];
       const newChart: ChartInstance = {
         id: `chart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         candidateId: candidate.id,
         title: candidate.title,
         chartType: candidate.chartType,
         reason: candidate.reason,
-        dimensions: ensured.dimensions,
-        metrics: ensured.metrics,
+        dimensionCandidates,
+        dimension2Candidates: dimension2Candidates,
+        metricCandidates: initialMetricCandidates,
+        selectedDimension: dimensionCandidates[0] ?? null,
+        selectedDimension2: dimension2Candidates[0] ?? null,
+        selectedMetric: initialMetricCandidates[0] ?? null,
         filters: [],
         createdAt: Date.now()
       };
@@ -1183,48 +2310,237 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   );
 
   useEffect(() => {
+    if (!selectedCandidateId && chartCandidates.length > 0) {
+      setSelectedCandidateId(chartCandidates[0].id);
+    }
+  }, [chartCandidates, selectedCandidateId]);
+
+  const handleSelectCandidate = useCallback(
+    (candidate: ChartCandidate) => {
+      setSelectedCandidateId(candidate.id);
+      setChartInstances(prev => {
+        const ensured = ensureFieldsForCandidate(candidate);
+        const initialDimensionCandidates = ensured.dimensions.slice(0, 5);
+        const initialMetricCandidates = ensured.metrics.slice(0, 5);
+        const isHeatmap = candidate.chartType === 'heatmap';
+        const dimensionCandidates = isHeatmap ? initialDimensionCandidates.slice(0, 1) : initialDimensionCandidates;
+        const dimension2Candidates = isHeatmap ? initialDimensionCandidates.slice(1, 2) : [];
+
+        const build = (base: Partial<ChartInstance> = {}) =>
+          ({
+            id: String(base.id || `chart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+            candidateId: candidate.id,
+            title: candidate.title,
+            chartType: candidate.chartType,
+            reason: candidate.reason,
+            dimensionCandidates,
+            dimension2Candidates,
+            metricCandidates: initialMetricCandidates,
+            selectedDimension: dimensionCandidates[0] ?? null,
+            selectedDimension2: dimension2Candidates[0] ?? null,
+            selectedMetric: initialMetricCandidates[0] ?? null,
+            filters: Array.isArray(base.filters) ? base.filters : [],
+            createdAt: typeof base.createdAt === 'number' ? base.createdAt : Date.now()
+          }) as ChartInstance;
+
+        if (!prev.length) {
+          const next = build();
+          setActiveChartId(next.id);
+          return [next];
+        }
+
+        const target = prev.find(c => c.id === activeChartId) || prev[0];
+        const next = build(target);
+        setActiveChartId(next.id);
+        return prev.map(c => (c.id === target.id ? next : c));
+      });
+    },
+    [activeChartId, ensureFieldsForCandidate]
+  );
+
+  useEffect(() => {
     if (!bootstrapped && chartCandidates.length > 0 && chartInstances.length === 0) {
       handleAddChart(chartCandidates[0], true);
       setBootstrapped(true);
     }
   }, [chartCandidates, chartInstances.length, bootstrapped, handleAddChart]);
 
-  const handleToggleField = (fieldName: string, role: FieldRole) => {
+  const getAxisKeys = (slot: AxisSlot) => {
+    if (slot === 'metric') {
+      return { candidateKey: 'metricCandidates' as const, selectedKey: 'selectedMetric' as const };
+    }
+    if (slot === 'dimension2') {
+      return { candidateKey: 'dimension2Candidates' as const, selectedKey: 'selectedDimension2' as const };
+    }
+    return { candidateKey: 'dimensionCandidates' as const, selectedKey: 'selectedDimension' as const };
+  };
+
+  const addFieldToAxis = (fieldName: string, slot: AxisSlot) => {
     if (!activeChart) return;
     setChartInstances(prev =>
       prev.map(chart => {
         if (chart.id !== activeChart.id) return chart;
-        const targetKey = role === 'dimension' ? 'dimensions' : 'metrics';
-        const exists = chart[targetKey].includes(fieldName);
-        const updated = exists
-          ? chart[targetKey].filter(item => item !== fieldName)
-          : [...chart[targetKey], fieldName];
+        const { candidateKey, selectedKey } = getAxisKeys(slot);
+        const existing = (chart as any)[candidateKey] || [];
+        if (existing.includes(fieldName)) {
+          return (chart as any)[selectedKey]
+            ? chart
+            : { ...chart, [selectedKey]: (chart as any)[selectedKey] ?? fieldName };
+        }
+        if (existing.length >= 5) {
+          alert(`${slot === 'metric' ? 'Y' : 'X'}轴最多可保留 5 个候选字段`);
+          return chart;
+        }
         return {
           ...chart,
-          [targetKey]: updated
+          [candidateKey]: [...existing, fieldName],
+          [selectedKey]: (chart as any)[selectedKey] ?? fieldName
         };
       })
     );
   };
 
+  const handleChartTypeChange = (chartId: string, nextType: ChartType) => {
+    setChartInstances(prev =>
+      prev.map(chart => {
+        if (chart.id !== chartId) return chart;
+        if (chart.chartType === nextType) return chart;
+
+        if (nextType === 'heatmap') {
+          const dimensionCandidates = Array.isArray(chart.dimensionCandidates) ? chart.dimensionCandidates : [];
+          const metricCandidates = Array.isArray(chart.metricCandidates) ? chart.metricCandidates : [];
+          const fallbackDim2 = dimensionCandidates[1] || '';
+          const dimension2Candidates = Array.isArray((chart as any).dimension2Candidates)
+            ? ((chart as any).dimension2Candidates as string[])
+            : (fallbackDim2 ? [fallbackDim2] : []);
+          const selectedDimension2 =
+            (chart as any).selectedDimension2 ??
+            dimension2Candidates[0] ??
+            null;
+
+          return {
+            ...chart,
+            chartType: nextType,
+            dimensionCandidates: dimensionCandidates.slice(0, 1),
+            dimension2Candidates: dimension2Candidates.slice(0, 5),
+            selectedDimension: (chart.selectedDimension ?? dimensionCandidates[0] ?? null),
+            selectedDimension2,
+            selectedMetric: chart.selectedMetric ?? metricCandidates[0] ?? null
+          };
+        }
+
+        return {
+          ...chart,
+          chartType: nextType
+        };
+      })
+    );
+  };
+
+  const removeFieldFromAxis = (fieldName: string, slot: AxisSlot) => {
+    if (!activeChartId) return;
+    setChartInstances(prev =>
+      prev.map(chart => {
+        if (chart.id !== activeChartId) return chart;
+        const { candidateKey, selectedKey } = getAxisKeys(slot);
+        const candidates = (chart as any)[candidateKey] || [];
+        if (!candidates.includes(fieldName)) return chart;
+        const updated = candidates.filter((item: string) => item !== fieldName);
+        const wasSelected = (chart as any)[selectedKey] === fieldName;
+        return {
+          ...chart,
+          [candidateKey]: updated,
+          [selectedKey]: wasSelected ? updated[0] ?? null : (chart as any)[selectedKey]
+        };
+      })
+    );
+  };
+
+  const handleAxisSelectionChange = (fieldName: string, slot: AxisSlot) => {
+    if (!activeChartId) return;
+    setChartInstances(prev =>
+      prev.map(chart => {
+        if (chart.id !== activeChartId) return chart;
+        const { candidateKey, selectedKey } = getAxisKeys(slot);
+        const candidates = (chart as any)[candidateKey] || [];
+        if (!candidates.includes(fieldName)) return chart;
+        return {
+          ...chart,
+          [selectedKey]: fieldName
+        };
+      })
+    );
+  };
+
+  const handleFieldDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!active) return;
+      const fieldName = active.data?.current?.fieldName as string | undefined;
+      const role = active.data?.current?.role as FieldRole | undefined;
+      const origin = active.data?.current?.origin as 'field-list' | 'axis' | undefined;
+      const axisSlot = (active.data?.current?.axisSlot as AxisSlot | undefined) || (role === 'metric' ? 'metric' : 'dimension');
+      if (!fieldName) return;
+      if (origin === 'field-list' && role) {
+        if (over?.id === AXIS_DROP_TARGET_IDS.dimension && role === 'dimension') {
+          addFieldToAxis(fieldName, 'dimension');
+        } else if (over?.id === AXIS_DROP_TARGET_IDS.dimension2 && role === 'dimension') {
+          addFieldToAxis(fieldName, 'dimension2');
+        } else if (over?.id === AXIS_DROP_TARGET_IDS.metric && role === 'metric') {
+          addFieldToAxis(fieldName, 'metric');
+        }
+      } else if (origin === 'axis') {
+        if (over?.id === AXIS_DROP_TARGET_IDS.dimension && axisSlot === 'dimension') {
+          return;
+        }
+        if (over?.id === AXIS_DROP_TARGET_IDS.dimension2 && axisSlot === 'dimension2') {
+          return;
+        }
+        if (over?.id === AXIS_DROP_TARGET_IDS.metric && axisSlot === 'metric') {
+          return;
+        }
+        removeFieldFromAxis(fieldName, axisSlot);
+      }
+    },
+    [addFieldToAxis, removeFieldFromAxis]
+  );
+
   const removeFieldFromCharts = useCallback((fieldName: string) => {
     setChartInstances(prev =>
-      prev.map(chart => ({
-        ...chart,
-        dimensions: chart.dimensions.filter(field => field !== fieldName),
-        metrics: chart.metrics.filter(field => field !== fieldName)
-      }))
+      prev.map(chart => {
+        const dimensionCandidates = (chart.dimensionCandidates || []).filter(field => field !== fieldName);
+        const dimension2Candidates = ((chart as any).dimension2Candidates || []).filter((field: string) => field !== fieldName);
+        const metricCandidates = (chart.metricCandidates || []).filter(field => field !== fieldName);
+        return {
+          ...chart,
+          dimensionCandidates,
+          dimension2Candidates,
+          metricCandidates,
+          selectedDimension: chart.selectedDimension === fieldName ? dimensionCandidates[0] ?? null : chart.selectedDimension,
+          selectedDimension2: (chart as any).selectedDimension2 === fieldName ? dimension2Candidates[0] ?? null : (chart as any).selectedDimension2,
+          selectedMetric: chart.selectedMetric === fieldName ? metricCandidates[0] ?? null : chart.selectedMetric
+        };
+      })
     );
   }, []);
 
   const replaceFieldInCharts = useCallback((oldName: string, newName: string) => {
     if (oldName === newName) return;
     setChartInstances(prev =>
-      prev.map(chart => ({
-        ...chart,
-        dimensions: chart.dimensions.map(field => (field === oldName ? newName : field)),
-        metrics: chart.metrics.map(field => (field === oldName ? newName : field))
-      }))
+      prev.map(chart => {
+        const dimensionCandidates = (chart.dimensionCandidates || []).map(field => (field === oldName ? newName : field));
+        const dimension2Candidates = ((chart as any).dimension2Candidates || []).map((field: string) => (field === oldName ? newName : field));
+        const metricCandidates = (chart.metricCandidates || []).map(field => (field === oldName ? newName : field));
+        return {
+          ...chart,
+          dimensionCandidates,
+          dimension2Candidates,
+          metricCandidates,
+          selectedDimension: chart.selectedDimension === oldName ? newName : chart.selectedDimension,
+          selectedDimension2: (chart as any).selectedDimension2 === oldName ? newName : (chart as any).selectedDimension2,
+          selectedMetric: chart.selectedMetric === oldName ? newName : chart.selectedMetric
+        };
+      })
     );
   }, []);
 
@@ -1321,15 +2637,19 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
     }
 
     const updateLocalField = () => {
-      if (targetField.source === 'ai-temp') {
-        setAiFields(prev => prev.map(field => (
-          field.id === editingFieldId ? { ...field, name: nextName } : field
-        )));
+      if (targetField.source === 'ai-temp' || targetField.source === 'custom') {
+        setAiFields(prev =>
+          prev.map(field =>
+            field.id === editingFieldId ? { ...field, name: nextName } : field
+          )
+        );
         return;
       }
-      setFields(prev => prev.map(field => (
-        field.id === editingFieldId ? { ...field, name: nextName } : field
-      )));
+      setFields(prev =>
+        prev.map(field =>
+          field.id === editingFieldId ? { ...field, name: nextName } : field
+        )
+      );
       if (targetField.source === 'notebook') {
         setFieldNameToIdMap(prev => {
           const nextMap = { ...prev };
@@ -1383,7 +2703,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
       cancelEditField();
     }
 
-    if (field.source === 'ai-temp') {
+    if (field.source === 'ai-temp' || field.source === 'custom') {
       setAiFields(prev => prev.filter(item => item.name !== fieldName));
       cleanup();
       return;
@@ -1428,6 +2748,21 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
     field.name.toLowerCase().includes(fieldSearch.toLowerCase())
   );
 
+  const selectableNoteIds = useMemo(
+    () =>
+      notes
+        .map(note => String(resolveNoteId(note)))
+        .filter((id): id is string => Boolean(id)),
+    [notes]
+  );
+
+  const isAllSelectableNotesChecked = useMemo(
+    () =>
+      selectableNoteIds.length > 0 &&
+      selectableNoteIds.every(id => selectedNoteIds.includes(id)),
+    [selectableNoteIds, selectedNoteIds]
+  );
+
   const handleToggleNoteSelection = (noteId: string) => {
     const id = String(noteId);
     setSelectedNoteIds(prev =>
@@ -1436,17 +2771,13 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   };
 
   const handleSelectAllNotesToggle = () => {
-    if (!notes.length) return;
-    const allIds = notes
-      .map(note => String(resolveNoteId(note)))
-      .filter(Boolean);
-    const isAllSelected = allIds.length > 0 && allIds.every(id => selectedNoteIds.includes(id));
-    if (isAllSelected) {
-      setSelectedNoteIds(prev => prev.filter(id => !allIds.includes(id)));
+    if (!selectableNoteIds.length) return;
+    if (isAllSelectableNotesChecked) {
+      setSelectedNoteIds(prev => prev.filter(id => !selectableNoteIds.includes(id)));
     } else {
       setSelectedNoteIds(prev => {
         const set = new Set(prev);
-        allIds.forEach(id => set.add(id));
+        selectableNoteIds.forEach(id => set.add(id));
         return Array.from(set);
       });
     }
@@ -1475,15 +2806,9 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
   };
 
   return (
-    <div className="min-h-screen bg-[#eef6fd] analysis-v2-body">
-      <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
-        <header className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            {/* 顶部标题文案已移除 */}
-          </div>
-          <div className="flex items-center gap-3" />
-        </header>
-
+    <DndContext sensors={sensors} onDragEnd={handleFieldDragEnd} collisionDetection={rectIntersection}>
+      <div className="min-h-screen bg-[#eef6fd] analysis-v2-body">
+        <div className="max-w-6xl mx-auto px-6 pt-0 pb-8 space-y-8">
         {error && (
           <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
             {error}
@@ -1499,188 +2824,203 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
           </div>
         ) : (
           <>
-            <section className="rounded-3xl border border-[#d4f3ed] bg-white shadow-sm overflow-hidden">
-              <div className="p-6 space-y-4">
-                <div className="flex items-center justify-between gap-4">
-                  <h2 className="text-lg font-semibold text-gray-900">选择笔记本与笔记范围</h2>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div className="relative min-w-[220px]" ref={notebookDropdownRef}>
-                    <button
-                      ref={notebookTriggerRef}
-                      type="button"
-                      onClick={() => setNotebookDropdownOpen(prev => !prev)}
-                      className="w-full flex items-center justify-between rounded-full border border-[#90e2d0] bg-gradient-to-r from-[#eef6fd]/60 to-white px-4 py-1.5 text-xs text-[#0a917a] hover:border-[#6bd8c0]"
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <div className="flex items-center gap-3">
+                <h2 className="text-sm font-semibold text-gray-900">当前笔记本</h2>
+                <div className="relative min-w-[220px]" ref={notebookDropdownRef}>
+                  <button
+                    ref={notebookTriggerRef}
+                    type="button"
+                    onClick={() => setNotebookDropdownOpen(prev => !prev)}
+                    className="w-full flex items-center justify-between rounded-full border border-[#90e2d0] bg-gradient-to-r from-[#eef6fd]/60 to-white px-4 py-1.5 text-xs text-[#0a917a] hover:border-[#6bd8c0]"
+                  >
+                    <span className="truncate">
+                      {notebook ? `${notebook.name}（${notes.length} 条笔记）` : '请选择笔记本'}
+                    </span>
+                    <svg
+                      className={`ml-2 h-3 w-3 flex-shrink-0 transition-transform ${
+                        notebookDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
                     >
-                      <span className="truncate">
-                        {notebook ? `${notebook.name}（${notes.length} 条笔记）` : '请选择笔记本'}
-                      </span>
-                      <svg
-                        className={`ml-2 h-3 w-3 flex-shrink-0 transition-transform ${
-                          notebookDropdownOpen ? 'rotate-180' : ''
-                        }`}
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {notebookDropdownOpen && notebookMenuPos &&
+                    createPortal(
+                      <div
+                        ref={notebookMenuRef}
+                        className="z-[180] bg-white border-2 border-[#b5ece0] rounded-2xl shadow-xl shadow-[#c4f1e5]"
+                        style={{
+                          position: 'fixed',
+                          top: notebookMenuPos.top,
+                          left: notebookMenuPos.left,
+                          width: notebookMenuPos.width,
+                          maxHeight: '300px',
+                          overflowY: 'auto',
+                          boxShadow:
+                            '0 10px 25px -5px rgba(6, 195, 168, 0.22), 0 0 0 1px rgba(6, 195, 168, 0.12)'
+                        }}
                       >
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    {notebookDropdownOpen && notebookMenuPos &&
-                      createPortal(
-                        <div
-                          ref={notebookMenuRef}
-                          className="z-[180] bg-white border-2 border-[#b5ece0] rounded-2xl shadow-xl shadow-[#c4f1e5]"
-                          style={{
-                            position: 'fixed',
-                            top: notebookMenuPos.top,
-                            left: notebookMenuPos.left,
-                            width: notebookMenuPos.width,
-                            maxHeight: '300px',
-                            overflowY: 'auto',
-                            boxShadow:
-                              '0 10px 25px -5px rgba(139, 92, 246, 0.2), 0 0 0 1px rgba(139, 92, 246, 0.1)'
-                          }}
-                        >
-                          <div className="p-2 text-xs">
-                            {notebooks.length === 0 ? (
-                              <div className="px-4 py-3 text-center text-gray-500">暂无笔记本，请先创建。</div>
-                            ) : (
-                              <>
+                        <div className="p-2 text-xs">
+                          {notebooks.length === 0 ? (
+                            <div className="px-4 py-3 text-center text-gray-500">暂无笔记本，请先创建。</div>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleNotebookChange('');
+                                  setNotebookDropdownOpen(false);
+                                  setHoveredNotebookId(null);
+                                }}
+                                className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                                  !notebookId ? 'bg-[#eef6fd] text-[#0a6154] font-medium' : 'text-gray-900 hover:bg-[#eef6fd]'
+                                }`}
+                              >
+                                <span>请选择笔记本</span>
+                              </button>
+                              {notebooks.map(nb => {
+                              const isSelected = notebookId === nb.notebook_id;
+                              const isHovered = hoveredNotebookId === nb.notebook_id;
+                              const shouldHighlight = isHovered || (!hoveredNotebookId && isSelected);
+                              const noteCount =
+                                isSelected && notes.length ? notes.length : nb.note_count || 0;
+                              return (
                                 <button
+                                  key={nb.notebook_id}
                                   type="button"
                                   onClick={() => {
-                                    handleNotebookChange('');
+                                    handleNotebookChange(nb.notebook_id);
                                     setNotebookDropdownOpen(false);
                                     setHoveredNotebookId(null);
                                   }}
+                                  onMouseEnter={() => setHoveredNotebookId(nb.notebook_id)}
+                                  onMouseLeave={() => setHoveredNotebookId(null)}
                                   className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
-                                    !notebookId ? 'bg-[#eef6fd] text-[#0a6154] font-medium' : 'text-gray-900 hover:bg-[#eef6fd]'
+                                    shouldHighlight
+                                      ? 'bg-[#eef6fd] text-[#0a6154] font-medium'
+                                      : 'text-gray-900 hover:bg-[#eef6fd]'
                                   }`}
                                 >
-                                  <span>请选择笔记本</span>
+                                  <div className="flex items-center justify-between">
+                                    <span>{nb.name}</span>
+                                    <span className="ml-2 text-gray-500" style={{ fontSize: '12px' }}>
+                                      ({noteCount}条笔记)
+                                    </span>
+                                  </div>
                                 </button>
-                                {notebooks.map(nb => {
-                                const isSelected = notebookId === nb.notebook_id;
-                                const isHovered = hoveredNotebookId === nb.notebook_id;
-                                const shouldHighlight = isHovered || (!hoveredNotebookId && isSelected);
-                                const noteCount =
-                                  isSelected && notes.length ? notes.length : nb.note_count || 0;
-                                return (
-                                  <button
-                                    key={nb.notebook_id}
-                                    type="button"
-                                    onClick={() => {
-                                      handleNotebookChange(nb.notebook_id);
-                                      setNotebookDropdownOpen(false);
-                                      setHoveredNotebookId(null);
-                                    }}
-                                    onMouseEnter={() => setHoveredNotebookId(nb.notebook_id)}
-                                    onMouseLeave={() => setHoveredNotebookId(null)}
-                                    className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
-                                      shouldHighlight
-                                        ? 'bg-[#eef6fd] text-[#0a6154] font-medium'
-                                        : 'text-gray-900 hover:bg-[#eef6fd]'
-                                    }`}
-                                  >
-                                    <div className="flex items-center justify-between">
-                                      <span>{nb.name}</span>
-                                      <span className="ml-2 text-gray-500" style={{ fontSize: '12px' }}>
-                                        ({noteCount}条笔记)
-                                      </span>
-                                    </div>
-                                  </button>
-                                );
-                              })}
-                              </>
-                            )}
-                          </div>
-                        </div>,
-                        document.body
-                      )}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-2 text-xs text-gray-600">
-                      <span>起始日期</span>
-                      <input
-                        type="date"
-                        value={noteFilterDateRange.from}
-                        onChange={e => handleDateFilterChange({ from: e.target.value })}
-                        className="rounded-full border border-gray-200 px-3 py-1.5 text-xs focus:border-[#6bd8c0] focus:outline-none"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-gray-600">
-                      <span>结束日期</span>
-                      <input
-                        type="date"
-                        value={noteFilterDateRange.to}
-                        onChange={e => handleDateFilterChange({ to: e.target.value })}
-                        className="rounded-full border border-gray-200 px-3 py-1.5 text-xs focus:border-[#6bd8c0] focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-[#e5ddff] bg-[#fafbff]">
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-[#ebe9ff]">
-                    <div className="text-sm font-medium text-gray-900">笔记列表</div>
-                    <div className="flex items-center gap-4 text-xs text-gray-500">
-                      <span>
-                        已选择{' '}
-                        {notes.filter(note =>
-                          selectedNoteIds.includes(String(resolveNoteId(note)))
-                        ).length}{' '}
-                        条
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleSelectAllNotesToggle}
-                        className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600 hover:border-[#6bd8c0]"
-                      >
-                        全选 / 取消全选
-                      </button>
-                    </div>
-                  </div>
-                  <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
-                    {notes.length > 0 ? (
-                      notes.map(note => {
-                        const id = String(resolveNoteId(note));
-                        const checked = selectedNoteIds.includes(id);
-                        const createdAt = note.created_at || note.updated_at;
-                        const mainText = note.title || note.content_text || '未命名笔记';
-                        return (
-                          <label
-                            key={id}
-                            className="flex items-start gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-white cursor-pointer"
-                          >
-                            <input
-                              type="checkbox"
-                              className="mt-1 rounded border-gray-300 text-[#0a917a] focus:ring-[#43ccb0]"
-                              checked={checked}
-                              onChange={() => handleToggleNoteSelection(id)}
-                            />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-medium truncate">{mainText}</span>
-                                {createdAt && (
-                                  <span className="text-[11px] text-gray-400 flex-shrink-0">
-                                    {String(createdAt).slice(0, 10)}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </label>
-                        );
-                      })
-                    ) : (
-                      <div className="px-4 py-8 text-center text-xs text-gray-400">当前条件下暂无笔记</div>
+                              );
+                            })}
+                            </>
+                          )}
+                        </div>
+                      </div>,
+                      document.body
                     )}
-                  </div>
                 </div>
               </div>
-            </section>
+              <button
+                type="button"
+                onClick={() => setNoteSettingsExpanded(prev => !prev)}
+                className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 hover:border-[#6bd8c0]"
+              >
+                {noteSettingsExpanded ? '收起设置 ▴' : '展开设置 ▾'}
+              </button>
+            </div>
+
+            {noteSettingsExpanded && (
+              <section className="rounded-3xl border border-[#d4f3ed] bg-white shadow-sm overflow-hidden">
+                <div className="p-6 space-y-4">
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 text-xs text-gray-600">
+                        <span>起始日期</span>
+                        <input
+                          type="date"
+                          value={noteFilterDateRange.from}
+                          onChange={e => handleDateFilterChange({ from: e.target.value })}
+                          className="rounded-full border border-gray-200 px-3 py-1.5 text-xs focus:border-[#6bd8c0] focus:outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-gray-600">
+                        <span>结束日期</span>
+                        <input
+                          type="date"
+                          value={noteFilterDateRange.to}
+                          onChange={e => handleDateFilterChange({ to: e.target.value })}
+                          className="rounded-full border border-gray-200 px-3 py-1.5 text-xs focus:border-[#6bd8c0] focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-[#c5f0e4] bg-[#f5fffb]">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-[#dff7ef] bg-white/60">
+                      <div className="text-sm font-semibold text-gray-900">笔记列表</div>
+                      <div className="flex items-center gap-4 text-xs text-gray-500">
+                        <span>
+                          已选择{' '}
+                          {notes.filter(note =>
+                            selectedNoteIds.includes(String(resolveNoteId(note)))
+                          ).length}{' '}
+                          条
+                        </span>
+                        <label className="inline-flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded-none border-gray-300 text-[#0a917a] focus:ring-[#43ccb0] disabled:cursor-not-allowed disabled:opacity-50"
+                            checked={isAllSelectableNotesChecked}
+                            onChange={handleSelectAllNotesToggle}
+                            disabled={!selectableNoteIds.length}
+                          />
+                          <span>全选</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto divide-y divide-[#e0f4ed]">
+                      {notes.length > 0 ? (
+                        notes.map(note => {
+                          const id = String(resolveNoteId(note));
+                          const checked = selectedNoteIds.includes(id);
+                          const createdAt = note.created_at || note.updated_at;
+                          const mainText = note.title || note.content_text || '未命名笔记';
+                          return (
+                            <label
+                              key={id}
+                              className="flex items-start gap-3 px-4 py-3 text-xs text-gray-700 hover:bg-[#f0fffa] cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                className="mt-1 rounded border-gray-300 text-[#0a917a] focus:ring-[#43ccb0]"
+                                checked={checked}
+                                onChange={() => handleToggleNoteSelection(id)}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium truncate">{mainText}</span>
+                                  {createdAt && (
+                                    <span className="text-[11px] text-gray-400 flex-shrink-0">
+                                      {String(createdAt).slice(0, 10)}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })
+                      ) : (
+                        <div className="px-4 py-8 text-center text-xs text-gray-400">当前条件下暂无笔记</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
 
             <div className="flex items-center justify-between">
-              <div className="inline-flex items-center rounded-full border border-[#d4f3ed] bg-white/80 px-4 py-1.5 text-xs font-medium text-gray-700 shadow-sm">
+              <div className="inline-flex items-center rounded-full border border-[#d4f3ed] bg-white/80 px-4 py-1.5 text-sm font-semibold text-gray-700 shadow-sm">
                 图表分析
               </div>
               <button
@@ -1696,7 +3036,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
               <section className="relative rounded-3xl border border-[#d4f3ed] bg-white shadow-sm overflow-hidden">
                 {isAnalyzing && (
                   <div className="absolute inset-0 z-20 flex items-center justify-center rounded-3xl bg-white/80 text-gray-600 text-sm font-medium">
-                    AI 正在分析...
+                    {stageMessage || 'AI 正在分析...'}
                   </div>
                 )}
                 <div
@@ -1710,200 +3050,238 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
                       : undefined
                   }
                 >
-                  <div className="p-6">
-                  <div className="mb-4">
-                    <h2 className="text-lg font-semibold text-gray-900">AI 推荐图表</h2>
-                    <p className="text-sm text-gray-500">
-                      {isAnalyzing
-                        ? 'AI 正在分析所选笔记，请稍候...'
-                        : 'AI 先理解笔记字段，推荐最适合的图表。默认自动选中第一个候选，可继续添加更多分析卡片。'}
-                    </p>
+                <div className="p-6">
+                  <div className="mb-6">
+                    <h3 className="mt-0 text-sm font-semibold text-gray-900">AI 推荐图表</h3>
+                    {chartCandidates.length > 0 && (
+                      <div className="mt-3" ref={aiCandidateDropdownRef}>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-gray-400">切换图表</span>
+                          <button
+                            ref={aiCandidateTriggerRef}
+                            type="button"
+                            onClick={() => setAiCandidateDropdownOpen(v => !v)}
+                            className="w-full max-w-[220px] h-[48px] min-h-[48px] px-4 rounded-full border border-[#7ddcc7] flex items-center justify-between gap-2 transition-colors bg-white text-[#0a917a] hover:bg-[#f0fffa] text-[14px] leading-[20px] shadow-sm"
+                            aria-label="切换 AI 推荐图表"
+                          >
+                            <span className="truncate">
+                              {(() => {
+                                const selected =
+                                  chartCandidates.find(c => c.id === selectedCandidateId) || chartCandidates[0];
+                                const label = selected ? (CHART_TYPE_LABELS[selected.chartType] || selected.chartType) : '—';
+                                return label;
+                              })()}
+                            </span>
+                            <svg
+                              className={`w-4 h-4 transition-transform flex-shrink-0 text-[#0a917a] ${aiCandidateDropdownOpen ? 'rotate-180' : ''}`}
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </button>
+                        </div>
+
+                        {aiCandidateDropdownOpen && aiCandidateMenuPos && createPortal(
+                          <div
+                            ref={aiCandidateMenuRef}
+                            className="z-[180] bg-white border border-gray-200 rounded-xl shadow-md"
+                            style={{
+                              position: 'fixed',
+                              top: aiCandidateMenuPos.top,
+                              left: aiCandidateMenuPos.left,
+                              width: aiCandidateMenuPos.width,
+                              background: '#ffffff',
+                              backgroundImage: 'none',
+                              boxShadow: '0 0 0 1px rgba(0,0,0,0.06), 0 12px 24px rgba(0,0,0,0.08)',
+                              filter: 'none'
+                            }}
+                          >
+                            <div className="p-2 max-h-[300px] overflow-y-auto bg-white">
+                              {chartCandidates.map(candidate => {
+                                const isActive = (selectedCandidateId || chartCandidates[0]?.id) === candidate.id;
+                                const label = CHART_TYPE_LABELS[candidate.chartType] || candidate.chartType;
+                                const aiTag = candidate.id === defaultCandidateId ? '（AI 推荐）' : '';
+                                return (
+                                  <button
+                                    key={candidate.id}
+                                    type="button"
+                                    onClick={() => {
+                                      handleSelectCandidate(candidate);
+                                      setAiCandidateDropdownOpen(false);
+                                    }}
+                                    className={`w-full text-left px-4 py-2 rounded-lg transition-colors mt-1 flex items-center gap-2 text-[14px] leading-[14px] ${
+                                      isActive
+                                        ? 'bg-[#f0fffa] text-[#0a917a]'
+                                        : 'text-gray-900 hover:bg-[#f0fffa]'
+                                    }`}
+                                  >
+                                    <span className={`w-4 text-sm ${isActive ? 'text-[#0a917a]' : 'text-transparent'}`}>✓</span>
+                                    <span className="font-medium whitespace-nowrap">
+                                      {label}
+                                      {aiTag}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>,
+                          document.body
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-                    {chartCandidates.map(candidate => {
-                      const isActive = candidate.id === activeCandidateId;
-                      const candidateChartInstance = chartInstances.find(chart => chart.candidateId === candidate.id);
-                      const alreadyAdded = Boolean(candidateChartInstance);
-                      const isDefaultSelected = alreadyAdded && defaultCandidateId === candidate.id;
-                      const chartTypeLabel = CHART_TYPE_LABELS[candidate.chartType] || candidate.chartType;
-                      return (
-                        <div
-                          key={candidate.id}
-                          className={`flex h-full flex-col rounded-2xl border p-4 transition-all ${isActive ? 'border-[#43ccb0] bg-[#eef6fd] shadow-lg' : 'border-gray-100 bg-white'}`}
-                        >
-                          <div className="flex items-center gap-3 mb-3">
-                            <div className="text-2xl">{candidate.icon}</div>
-                            <div>
-                              <p className="font-semibold text-gray-900">
-                                {chartTypeLabel}·{candidate.chartType.toUpperCase()}
-                              </p>
+                  <div className="mt-1">
+                    {chartCandidates.length > 0 ? (
+                      (() => {
+                        const selectedCandidate =
+                          chartCandidates.find(candidate => candidate.id === selectedCandidateId) || chartCandidates[0];
+                        const selectedTypeLabel =
+                          CHART_TYPE_LABELS[selectedCandidate.chartType] || selectedCandidate.chartType;
+                        const isApplied = Boolean(
+                          chartInstances.find(chart => chart.candidateId === selectedCandidate.id)
+                        );
+
+                        return (
+                          <div className="flex h-full flex-col rounded-2xl border border-[1.5px] border-[#d4f3ed] bg-white p-4 transition-all">
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="flex items-center gap-3">
+                                <div className="text-2xl">{selectedCandidate.icon}</div>
+                                <div>
+                                  <p className="font-semibold text-gray-900">
+                                    {selectedTypeLabel}·{selectedCandidate.chartType.toUpperCase()}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <p className="!text-xs text-gray-600 mb-3 leading-relaxed">
+                              {selectedCandidate.title}：{selectedCandidate.reason}
+                            </p>
+                            <p className="text-xs text-gray-400 mb-4">
+                              需要字段：{[...selectedCandidate.requiredDimensions, ...selectedCandidate.requiredMetrics].join(', ')}
+                            </p>
+
+                            <div className="mt-auto space-y-2">
+                              <button
+                                type="button"
+                                onClick={() => handleSelectCandidate(selectedCandidate)}
+                                className={`w-full rounded-2xl px-3 py-2 text-sm font-medium transition-colors ${
+                                  isApplied ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-gray-900 text-white hover:bg-black'
+                                }`}
+                                disabled={isApplied}
+                              >
+                                {isApplied ? '已选择' : '选择该图表'}
+                              </button>
                             </div>
                           </div>
-                          <p className="text-sm text-gray-600 mb-3 leading-relaxed">
-                            {candidate.title}：{candidate.reason}
-                          </p>
-                          <p className="text-xs text-gray-400 mb-4">
-                            需要字段：{[...candidate.requiredDimensions, ...candidate.requiredMetrics].join(', ')}
-                          </p>
-                          <div className="mt-auto space-y-2">
-                            <button
-                              disabled={alreadyAdded}
-                              onClick={() => handleAddChart(candidate)}
-                              className={`w-full rounded-2xl px-3 py-2 text-sm font-medium transition-colors ${alreadyAdded ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-gray-900 text-white hover:bg-black'}`}
-                            >
-                              {isDefaultSelected ? '已选择' : alreadyAdded ? '已加入分析' : '加入分析'}
-                            </button>
-                            {isDefaultSelected && candidateChartInstance && (
-                              <button
-                                onClick={() => handleRemoveChart(candidateChartInstance.id)}
-                                className="w-full rounded-2xl border border-gray-200 px-3 py-2 text-sm font-medium text-gray-600 hover:border-red-300 hover:text-red-500 transition-colors"
-                              >
-                                取消选择
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })()
+                    ) : (
+                      <div className="rounded-2xl border border-dashed border-[#b5ece0] bg-[#eef6fd]/40 p-6 text-center text-xs text-gray-500">
+                        暂无 AI 推荐图表
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h3 className="text-lg font-semibold text-gray-900">字段表</h3>
-                      <p className="text-sm text-gray-500">
-                        显示现有字段与 AI 推荐字段，供快速勾选维度/指标。
-                      </p>
+                    <div className="flex items-center gap-3">
+                      <h3 className="mt-0 text-sm font-semibold text-gray-900">字段表</h3>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomFieldName('');
+                          setCustomFieldRole('dimension');
+                          setCustomFieldModalOpen(true);
+                        }}
+                        className="inline-flex items-center rounded-full border border-[#90dfcb] bg-white px-3 py-1.5 text-[12px] text-[#0a917a] hover:bg-[#effdf8] hover:border-[#43ccb0]"
+                      >
+                        +自定义
+                      </button>
                     </div>
                     <div className="flex items-center gap-2">
                       <input
                         value={fieldSearch}
                         onChange={e => setFieldSearch(e.target.value)}
                         placeholder="搜索字段..."
-                        className="rounded-full border border-gray-200 px-3 py-1.5 text-sm focus:border-[#6bd8c0] focus:outline-none"
+                        className="!w-[112px] rounded-full border border-gray-200 px-3 py-1.5 text-[12px] focus:border-[#6bd8c0] focus:outline-none"
                       />
-                      <button
-                        onClick={() => setFieldPanelOpen(true)}
-                        className="rounded-full border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:border-[#6bd8c0]"
-                      >
-                        Excel 字段表
-                      </button>
                     </div>
                   </div>
-                  <div className="overflow-hidden rounded-2xl border border-gray-100">
-                    <table className="min-w-full divide-y divide-gray-100 text-sm table-auto">
-                      <thead className="bg-gray-50 text-gray-500">
-                        <tr>
-                          <th className="px-4 py-2 text-left font-medium w-1/3">字段名称</th>
-                          <th className="px-4 py-2 text-left font-medium w-1/6">来源</th>
-                          <th className="px-4 py-2 text-left font-medium w-32">操作</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 text-xs">
-                        {filteredFields.map(field => (
-                          <tr key={field.id}>
-                            <td className="px-4 py-2">
-                              <div className="flex flex-col">
-                                <span className="font-medium text-gray-900">{field.name}</span>
-                                {field.source === 'ai-temp' && (
-                                  <span className="text-xs text-[#0a917a]">AI 暂存字段</span>
-                                )}
-                                {field.description && (
-                                  <span className="text-xs text-gray-400">{field.description}</span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-4 py-2 text-gray-600 whitespace-nowrap">
-                              {field.source === 'notebook' && '现有字段'}
-                              {field.source === 'system' && 'AI推荐'}
-                              {field.source === 'ai-temp' && 'AI 生成'}
-                            </td>
-                            <td className="px-4 py-2">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <button
-                                  onClick={() => beginEditField(field)}
-                                  className="rounded-full border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:border-[#6bd8c0]"
-                                >
-                                  编辑
-                                </button>
-                                {editingFieldId === field.id ? (
-                                  <button
-                                    onClick={cancelEditField}
-                                    className="rounded-full border border-gray-200 px-2 py-1 text-[11px] text-gray-500 hover:border-gray-400"
-                                  >
-                                    取消
-                                  </button>
-                                ) : (
-                                  <button
-                                    onClick={() => handleDeleteField(field)}
-                                    className="rounded-full border border-gray-200 px-2 py-1 text-[11px] text-red-500 hover:border-red-300"
-                                  >
-                                    删除
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                        {!filteredFields.length && (
-                          <tr>
-                            <td colSpan={3} className="px-4 py-6 text-center text-gray-400">
-                              暂无字段
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                  <div className="mt-1 space-y-2">
+                    {filteredFields.map(field => (
+                      <DraggableFieldListItem
+                        key={field.id}
+                        field={field}
+                        onDelete={() => {
+                          setPendingDeleteField(field);
+                        }}
+                      />
+                    ))}
+
                   </div>
                 </div>
                 <div className="p-6">
-                  <h3 className="text-lg font-semibold text-gray-900 mb-1">维度 / 指标</h3>
-                  <p className="text-sm text-gray-500 mb-4">
-                    AI 已根据图表需求自动勾选合适字段，可按需增删。
-                  </p>
+                  <h3 className="mt-0 text-sm font-semibold text-gray-900 mb-6">图表配置</h3>
                   {activeChart ? (
-                    <div className="space-y-6">
+                    <div className="mt-1 space-y-6">
                       <div>
-                        <h4 className="text-sm font-semibold text-gray-700 mb-2">维度</h4>
-                        <div className="space-y-2">
-                          {allFields
-                            .filter(field => field.role === 'dimension')
-                            .map(field => (
-                              <label key={field.id} className="flex items-center gap-3 text-sm text-gray-700">
-                                <input
-                                  type="checkbox"
-                                  checked={activeChart.dimensions.includes(field.name)}
-                                  onChange={() => handleToggleField(field.name, 'dimension')}
-                                  className="rounded border-gray-300 text-[#0a917a] focus:ring-[#43ccb0]"
-                                />
-                                <span>{field.name}</span>
-                                {field.source === 'ai-temp' && <span className="text-xs text-[#0a917a]">AI</span>}
-                              </label>
-                            ))}
-                        </div>
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">
+                          {activeChart.chartType === 'line'
+                            ? '时间（X）'
+                            : activeChart.chartType === 'pie'
+                              ? '分类维度'
+                              : activeChart.chartType === 'heatmap'
+                                ? '维度一'
+                                : '分类（X）'}
+                        </h4>
+                        <AxisDropZone
+                          axisSlot="dimension"
+                          candidates={activeChart.dimensionCandidates || []}
+                          selectedField={activeChart.selectedDimension}
+                          radioGroupName={`dimension-${activeChart.id}`}
+                          emptyHint="拖拽字段到此处，创建维度候选"
+                          onSelect={handleAxisSelectionChange}
+                          onRemove={removeFieldFromAxis}
+                        />
                       </div>
-                      <div>
-                        <h4 className="text-sm font-semibold text-gray-700 mb-2">指标</h4>
-                        <div className="space-y-2">
-                          {allFields
-                            .filter(field => field.role === 'metric')
-                            .map(field => (
-                              <label key={field.id} className="flex items-center gap-3 text-sm text-gray-700">
-                                <input
-                                  type="checkbox"
-                                  checked={activeChart.metrics.includes(field.name)}
-                                  onChange={() => handleToggleField(field.name, 'metric')}
-                                  className="rounded border-gray-300 text-[#0a917a] focus:ring-[#43ccb0]"
-                                />
-                                <span>{field.name}</span>
-                                {field.source === 'ai-temp' && <span className="text-xs text-[#0a917a]">AI</span>}
-                              </label>
-                            ))}
+                      {activeChart.chartType === 'heatmap' && (
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">维度二</h4>
+                          <AxisDropZone
+                            axisSlot="dimension2"
+                            candidates={(activeChart as any).dimension2Candidates || []}
+                            selectedField={(activeChart as any).selectedDimension2 || null}
+                            radioGroupName={`dimension2-${activeChart.id}`}
+                            emptyHint="拖拽字段到此处，创建第二维度候选"
+                            onSelect={handleAxisSelectionChange}
+                            onRemove={removeFieldFromAxis}
+                          />
                         </div>
+                      )}
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">
+                          {activeChart.chartType === 'pie'
+                            ? '数值 / 数量'
+                            : activeChart.chartType === 'heatmap'
+                              ? '强度'
+                              : '数值（Y）'}
+                        </h4>
+                        <AxisDropZone
+                          axisSlot="metric"
+                          candidates={activeChart.metricCandidates || []}
+                          selectedField={activeChart.selectedMetric}
+                          radioGroupName={`metric-${activeChart.id}`}
+                          emptyHint="拖拽字段到此处，创建数值候选"
+                          onSelect={handleAxisSelectionChange}
+                          onRemove={removeFieldFromAxis}
+                        />
                       </div>
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500">请先选择或添加图表</p>
+                    null
                   )}
                 </div>
                 {isDesktop && (
@@ -1938,24 +3316,44 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
               <div className="p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900">分析画布</h3>
-                    <p className="text-sm text-gray-500">
-                      默认生成一张最佳图表，可继续把推荐的图表加入画布。
-                    </p>
+                    <h3 className="text-sm font-semibold text-gray-900">
+                      {activeChart ? CHART_TYPE_LABELS[activeChart.chartType] || '图表' : '图表'}
+                    </h3>
                   </div>
                 </div>
                 <div className="space-y-4">
                   {chartInstances.map(chart => (
                     <div
                       key={chart.id}
-                      className={`rounded-3xl border p-5 shadow-sm bg-white transition-all ${chart.id === activeChartId ? 'border-[#43ccb0] shadow-lg' : 'border-gray-100'}`}
+                      className={`rounded-3xl border border-[1.5px] p-5 shadow-sm bg-white transition-all ${chart.id === activeChartId ? 'border-[#43ccb0] shadow-lg' : 'border-[#d4f3ed]'}`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                         <div>
                           <p className="text-base font-semibold text-gray-900">{chart.title}</p>
                           <p className="text-sm text-gray-500">{chart.reason}</p>
+                          {(() => {
+                            const aiType = inferCandidateChartType(chart.candidateId);
+                            if (!aiType || aiType === chart.chartType) return null;
+                            return (
+                              <p className="mt-1 text-xs text-gray-400">
+                                已切换为 {CHART_TYPE_LABELS[chart.chartType] || chart.chartType}（AI 推荐：{CHART_TYPE_LABELS[aiType] || aiType}）
+                              </p>
+                            );
+                          })()}
                         </div>
                         <div className="flex items-center gap-2">
+                          <select
+                            value={chart.chartType}
+                            onChange={event => handleChartTypeChange(chart.id, event.target.value as ChartType)}
+                            className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 hover:border-[#6bd8c0] focus:border-[#6bd8c0] focus:outline-none"
+                            aria-label="选择图表类型"
+                          >
+                            {(['line', 'bar', 'pie', 'heatmap', 'area', 'wordcloud'] as ChartType[]).map(t => (
+                              <option key={t} value={t}>
+                                {CHART_TYPE_LABELS[t] || t}
+                              </option>
+                            ))}
+                          </select>
                           <button
                             onClick={() => setActiveChartId(chart.id)}
                             className={`rounded-full px-3 py-1.5 text-xs ${chart.id === activeChartId ? 'bg-[#06c3a8] text-white' : 'bg-gray-100 text-gray-600'}`}
@@ -1991,7 +3389,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
             </section>
 
             <div className="flex items-center justify-between">
-              <div className="inline-flex items-center rounded-full border border-[#d4f3ed] bg-white/80 px-4 py-1.5 text-xs font-medium text-gray-700 shadow-sm">
+              <div className="inline-flex items-center rounded-full border border-[#d4f3ed] bg-white/80 px-4 py-1.5 text-sm font-semibold text-gray-700 shadow-sm">
                 AI 分析
               </div>
               <button
@@ -2004,7 +3402,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
             </div>
 
             {aiPanelExpanded && (
-              <section className="rounded-3xl border border-[#e5ddff] bg-white shadow-sm overflow-hidden">
+              <section className="rounded-3xl border border-[#d4f3ed] bg-white shadow-sm overflow-hidden">
                 <div className="p-6 space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="relative inline-flex items-center gap-2">
@@ -2073,13 +3471,12 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
                         setIsEditingAiPrompt(true);
                         setPromptTitleDropdownOpen(false);
                       }}
-                      className="px-3 py-1.5 text-xs font-medium text-[#7c3aed] bg-[#f5f3ff] rounded-full hover:bg-[#ede9fe]"
+                      className="px-3 py-1.5 text-xs font-medium text-[#0a917a] bg-[#e8fbf6] rounded-full hover:bg-[#d4f3ed]"
                     >
                       新建 Prompt
                     </button>
                   </div>
                   <div>
-                    <p className="text-xs text-gray-500 mb-2">提示词内容（手动选择）</p>
                     {isEditingAiPrompt ? (
                       <textarea
                         value={aiPromptDraft}
@@ -2159,12 +3556,9 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
 
             <section className="rounded-3xl border border-[#e5ddff] bg-white shadow-sm overflow-hidden">
               <div className="p-6 space-y-3">
-                <h3 className="text-lg font-semibold text-gray-900">AI 分析结果</h3>
-                <p className="text-xs text-gray-500">
-                  AI 对所选图表和字段的总结、洞察和建议会展示在这里。
-                </p>
+                <h3 className="text-sm font-semibold text-gray-900">笔记分析</h3>
                 <div className="min-h-[160px] rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-700 whitespace-pre-wrap">
-                  暂无分析结果。后续接入 AI 接口后，在这里渲染返回的内容。
+                  暂无分析结果。
                 </div>
               </div>
             </section>
@@ -2207,8 +3601,8 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
                     onChange={e => setNewFieldRole(e.target.value as FieldRole)}
                     className="rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[#6bd8c0] focus:outline-none"
                   >
-                    <option value="dimension">维度（文本/分类）</option>
-                    <option value="metric">指标（数字）</option>
+                    <option value="dimension">X轴（文本/分类）</option>
+                    <option value="metric">Y轴（数字）</option>
                   </select>
                 </div>
                 <button
@@ -2264,7 +3658,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
                                         编辑
                                       </button>
                                       <button
-                                        onClick={() => handleDeleteField(field)}
+                                        onClick={() => setPendingDeleteField(field)}
                                         className="text-xs text-gray-400 hover:text-red-500"
                                         title="删除字段"
                                       >
@@ -2305,7 +3699,7 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
                       </tbody>
                     </table>
                   ) : (
-                    <div className="py-10 text-center text-gray-400 text-sm">暂无字段</div>
+                    null
                   )}
                 </div>
                 {tableScrollState.max > 0 && (
@@ -2327,7 +3721,156 @@ const AnalysisSettingV2Page = ({ notebookIdOverride }: AnalysisSettingV2PageProp
           </div>
         </div>
       )}
-    </div>
+      {customFieldModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="border-b px-6 py-4 flex items-center justify-between">
+              <div>
+                <h2 className="font-semibold text-slate-900 text-[14px]">新建自定义字段</h2>
+                <p className="text-slate-500 mt-1 text-[12px]">
+                  输入字段名称，并选择该字段是作为数值指标还是文本维度。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!customFieldSubmitting) {
+                    setCustomFieldModalOpen(false);
+                  }
+                }}
+                className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4 text-[12px]">
+              <div className="space-y-2">
+                <label className="text-xs text-gray-600">字段名称</label>
+                <input
+                  type="text"
+                  value={customFieldName}
+                  onChange={e => setCustomFieldName(e.target.value)}
+                  placeholder="例如：专注度"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#43ccb0]"
+                  disabled={customFieldSubmitting}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs text-gray-600">字段角色</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCustomFieldRole('dimension')}
+                    className={`flex-1 px-3 py-2 rounded-lg border text-[12px] ${
+                      customFieldRole === 'dimension'
+                        ? 'border-[#43ccb0] bg-[#eef6fd] text-[#0a6154]'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                    }`}
+                    disabled={customFieldSubmitting}
+                  >
+                    文本/分类（X轴）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCustomFieldRole('metric')}
+                    className={`flex-1 px-3 py-2 rounded-lg border text-[12px] ${
+                      customFieldRole === 'metric'
+                        ? 'border-[#43ccb0] bg-[#eef6fd] text-[#0a6154]'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                    }`}
+                    disabled={customFieldSubmitting}
+                  >
+                    数值指标（Y轴）
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="border-t px-6 py-4 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!customFieldSubmitting) {
+                    setCustomFieldModalOpen(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-lg border border-[#90e2d0] text-slate-700 hover:bg-[#eef6fd] hover:border-[#43ccb0] text-[12px]"
+                disabled={customFieldSubmitting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateCustomAiField}
+                className="px-4 py-2 rounded-lg bg-[#06c3a8] text-white text-[12px] disabled:opacity-50"
+                disabled={customFieldSubmitting}
+              >
+                {customFieldSubmitting ? '生成中...' : '确定'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingDeleteField && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
+            <div className="border-b px-6 py-4 flex items-center justify-between">
+              <h2 className="font-semibold text-slate-900 text-[14px]">删除字段</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deleteFieldSubmitting) {
+                    setPendingDeleteField(null);
+                  }
+                }}
+                className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-3 text-[12px]">
+              <p className="text-slate-800">
+                确定要删除字段「{pendingDeleteField.name}」吗？
+              </p>
+              <p className="text-slate-500 text-[11px]">
+                删除后，该字段将从字段表和图表配置中移除，无法恢复。
+              </p>
+            </div>
+            <div className="border-t px-6 py-4 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deleteFieldSubmitting) {
+                    setPendingDeleteField(null);
+                  }
+                }}
+                className="px-4 py-2 rounded-lg border border-[#90e2d0] text-slate-700 hover:bg-[#eef6fd] hover:border-[#43ccb0] text-[12px]"
+                disabled={deleteFieldSubmitting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!pendingDeleteField) return;
+                  try {
+                    setDeleteFieldSubmitting(true);
+                    await handleDeleteField(pendingDeleteField);
+                    setPendingDeleteField(null);
+                  } finally {
+                    setDeleteFieldSubmitting(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-lg bg-red-500 text-white text-[12px] disabled:opacity-50"
+                disabled={deleteFieldSubmitting}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      </div>
+    </DndContext>
   );
 };
 

@@ -17,18 +17,47 @@ export const FIELD_TEMPLATE_DEFINITIONS = [
   { key: 'note_created_at', label: '笔记创建时间' }
 ];
 
+const SOURCE_DEFAULT_KEYS = {
+  link: [
+    'title',
+    'content',
+    'summary',
+    'keywords',
+    'img_urls',
+    'source_url',
+    'author',
+    'published_at',
+    'source_platform',
+    'note_type',
+    'note_created_at'
+  ],
+  manual: [
+    'title',
+    'content',
+    'summary',
+    'keywords',
+    'img_urls',
+    'published_at',
+    'source_platform',
+    'note_type',
+    'note_created_at'
+  ]
+};
+
 const generateTemplateId = (prefix = 'tpl') =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 const getFieldDefinition = (key) =>
   FIELD_TEMPLATE_DEFINITIONS.find((item) => item.key === key) || null;
 
-export const buildDefaultFieldTemplate = () =>
-  FIELD_TEMPLATE_DEFINITIONS.map((field, index) => ({
+export const buildDefaultFieldTemplate = (sourceType = 'link') => {
+  const enabledKeys = new Set(SOURCE_DEFAULT_KEYS[sourceType] || []);
+  return FIELD_TEMPLATE_DEFINITIONS.map((field, index) => ({
     ...field,
-    enabled: true,
+    enabled: enabledKeys.has(field.key),
     order: index
   }));
+};
 
 export const sanitizeTemplateSource = (value) => {
   const normalized = sanitizeString(value).toLowerCase();
@@ -91,17 +120,17 @@ export const buildTemplateResponse = (notebookId, sourceType, fields) => ({
 });
 
 export const getFieldTemplateForNotebook = async (db, notebookId, sourceType) => {
-  if (!db || !notebookId || !sourceType) return buildDefaultFieldTemplate();
+  if (!db || !notebookId || !sourceType) return buildDefaultFieldTemplate(sourceType);
   const row = await db.get(
     'SELECT fields FROM notebook_field_templates WHERE notebook_id = ? AND source_type = ?',
     [notebookId, sourceType]
   );
   const parsed = parseStoredTemplate(row?.fields);
-  return normalizeTemplateFields(parsed);
+  return parsed ? normalizeTemplateFields(parsed) : buildDefaultFieldTemplate(sourceType);
 };
 
 export const saveFieldTemplateForNotebook = async (db, notebookId, sourceType, fields) => {
-  if (!db || !notebookId || !sourceType) return buildDefaultFieldTemplate();
+  if (!db || !notebookId || !sourceType) return buildDefaultFieldTemplate(sourceType);
   const normalized = normalizeTemplateFields(fields);
   const payload = JSON.stringify(normalized);
   const now = new Date().toISOString();

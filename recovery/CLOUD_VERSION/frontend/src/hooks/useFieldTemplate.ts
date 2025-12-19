@@ -18,12 +18,14 @@ interface UseFieldTemplateOptions {
   notebooks: FieldTemplateNotebook[];
 }
 
-const buildDefaultState = () => buildDefaultTemplateFields();
-
 export const useFieldTemplate = ({ source, notebooks }: UseFieldTemplateOptions) => {
   const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null);
-  const [templateFields, setTemplateFields] = useState<FieldTemplateField[]>(buildDefaultState);
-  const [draftFields, setDraftFields] = useState<FieldTemplateField[]>(buildDefaultState);
+  const [templateFields, setTemplateFields] = useState<FieldTemplateField[]>(() =>
+    buildDefaultTemplateFields(source)
+  );
+  const [draftFields, setDraftFields] = useState<FieldTemplateField[]>(() =>
+    buildDefaultTemplateFields(source)
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -40,26 +42,45 @@ export const useFieldTemplate = ({ source, notebooks }: UseFieldTemplateOptions)
     [notebooks, selectedNotebookId]
   );
 
-  const applyTemplateResponse = useCallback((fields: FieldTemplateField[]) => {
-    setTemplateFields(fields);
-    setDraftFields(fields);
-  }, []);
+  const sanitizeTemplateFields = useCallback(
+    (fields?: FieldTemplateField[] | null) => {
+      const defaults = buildDefaultTemplateFields(source);
+      if (!fields?.length) return defaults;
+
+      const incoming = new Map(fields.map((field) => [field.key, field]));
+      return defaults.map((field) => {
+        const matched = incoming.get(field.key);
+        if (!matched) return field;
+        return { ...field, enabled: matched.enabled };
+      });
+    },
+    [source]
+  );
+
+  const applyTemplateResponse = useCallback(
+    (fields: FieldTemplateField[]) => {
+      const sanitized = sanitizeTemplateFields(fields);
+      setTemplateFields(sanitized);
+      setDraftFields(sanitized);
+    },
+    [sanitizeTemplateFields]
+  );
 
   const fetchTemplate = useCallback(
     async (notebookId: string | null) => {
       if (!notebookId) {
-        applyTemplateResponse(buildDefaultState());
+        applyTemplateResponse(buildDefaultTemplateFields(source));
         return;
       }
       setLoading(true);
       try {
         const data = await fetchNotebookFieldTemplate(notebookId, source);
-        applyTemplateResponse(data?.fields || buildDefaultState());
+        applyTemplateResponse(data?.fields || buildDefaultTemplateFields(source));
         setError(null);
       } catch (err: any) {
         console.error('❌ 获取字段模板失败:', err);
         setError(err?.message || '加载字段模板失败');
-        applyTemplateResponse(buildDefaultState());
+        applyTemplateResponse(buildDefaultTemplateFields(source));
       } finally {
         setLoading(false);
       }
@@ -72,7 +93,7 @@ export const useFieldTemplate = ({ source, notebooks }: UseFieldTemplateOptions)
     const initialize = async () => {
       if (!notebooks.length) {
         setSelectedNotebookId(null);
-        applyTemplateResponse(buildDefaultState());
+        applyTemplateResponse(buildDefaultTemplateFields(source));
         setInitialized(true);
         return;
       }
@@ -94,7 +115,7 @@ export const useFieldTemplate = ({ source, notebooks }: UseFieldTemplateOptions)
         if (!cancelled) {
           console.error('❌ 初始化字段模板失败:', err);
           setError(err?.message || '加载字段模板失败');
-          applyTemplateResponse(buildDefaultState());
+          applyTemplateResponse(buildDefaultTemplateFields(source));
         }
       } finally {
         if (!cancelled) {
@@ -172,8 +193,8 @@ export const useFieldTemplate = ({ source, notebooks }: UseFieldTemplateOptions)
   }, []);
 
   const resetDraftFields = useCallback(() => {
-    setDraftFields(buildDefaultState());
-  }, []);
+    setDraftFields(buildDefaultTemplateFields(source));
+  }, [source]);
 
   const hasUnsavedChanges = useMemo(() => {
     const original = JSON.stringify(templateFields);

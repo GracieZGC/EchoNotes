@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { initDB } from './lib/db.js';
 import { initParseRoutes } from './routes/parse.js';
+import { initAIChartV3Routes } from './routes/aiChartV3.js';
 import AIService from './services/ai-service.js';
 import { startTursoSync, importFromTurso } from './services/turso-sync.js';
 import { sanitizeString } from './lib/string-utils.js';
@@ -340,6 +341,286 @@ const AI_MOOD_FIELD_CONFIG = {
     role: 'dimension',
     dataType: 'text'
   }
+};
+
+const inferFieldMetaFromName = (name, roleOverride = null, dataTypeOverride = null) => {
+  const allowedRoles = ['dimension', 'metric'];
+  const allowedTypes = ['date', 'number', 'text', 'category'];
+  const normalizedRole = allowedRoles.includes(roleOverride) ? roleOverride : null;
+  const normalizedType = allowedTypes.includes(dataTypeOverride) ? dataTypeOverride : null;
+  const lowered = (name || '').toLowerCase();
+  const numericKeywords = ['分', '比', '率', '量', '次数', '频', 'score', '得分', '指数', '平均', '总', '数量', '比率', '比重', '耗时', '时长', '金额', '成本'];
+  const isNumeric = numericKeywords.some(
+    (keyword) => lowered.includes(keyword) || (name || '').includes(keyword)
+  );
+  if (normalizedRole && normalizedType) {
+    return { role: normalizedRole, dataType: normalizedType };
+  }
+  if (normalizedRole) {
+    return {
+      role: normalizedRole,
+      dataType:
+        normalizedType || (normalizedRole === 'metric' ? 'number' : 'text')
+    };
+  }
+  if (normalizedType) {
+    return {
+      role: normalizedType === 'number' ? 'metric' : 'dimension',
+      dataType: normalizedType
+    };
+  }
+  return {
+    role: isNumeric ? 'metric' : 'dimension',
+    dataType: isNumeric ? 'number' : 'text'
+  };
+};
+
+const truncateText = (text = '', maxLength = 280) => {
+  if (!text) return '';
+  const normalized = String(text).replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+};
+
+const flattenNoteText = (note = {}) => {
+  const contentPieces = [
+    note.title,
+    note.summary,
+    note.content_text,
+    note.content,
+    note.component_data_text
+  ];
+  if (note.component_data) {
+    const parsed = safeJsonParse(note.component_data, null);
+    if (Array.isArray(parsed)) {
+      parsed.forEach((block) => {
+        if (block && typeof block === 'object') {
+          contentPieces.push(block.title, block.content, block.value, block.text);
+        }
+      });
+    } else if (parsed && typeof parsed === 'object') {
+      Object.values(parsed).forEach((value) => {
+        if (typeof value === 'string') contentPieces.push(value);
+        if (value && typeof value === 'object') {
+          Object.values(value).forEach((nested) => {
+            if (typeof nested === 'string') contentPieces.push(nested);
+          });
+        }
+      });
+    } else if (typeof note.component_data === 'string') {
+      contentPieces.push(note.component_data);
+    }
+  }
+  return contentPieces
+    .filter((value) => typeof value === 'string' && value.trim().length)
+    .join(' ');
+};
+
+const normalizeAssistantMessages = (rawMessages) => {
+  if (!Array.isArray(rawMessages)) return [];
+  const normalized = [];
+  rawMessages.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const role = String(item.role || '').trim().toLowerCase();
+    if (role !== 'user' && role !== 'assistant') return;
+    const content = typeof item.content === 'string' ? item.content.trim() : '';
+    if (!content) return;
+    normalized.push({
+      role,
+      content: content.length > 2000 ? `${content.slice(0, 1999)}…` : content
+    });
+  });
+  // 防止过长对话导致 prompt 爆炸
+  return normalized.slice(-30);
+};
+
+const buildNotebookAssistantSystemPrompt = ({
+  notebookName,
+  notes,
+  startDate,
+  endDate
+}) => {
+  const maxChars = 14000;
+  const range =
+    startDate && endDate ? `${startDate} 至 ${endDate}` : '最近';
+  let prompt = `你是我的个人 AI 助手。请基于我提供的“笔记本笔记内容”回答用户问题，并给出清晰、可执行的建议。\n要求：\n- 用中文回答。\n- 优先使用 Markdown 分点输出。\n- 如果笔记信息不足以支持结论，请明确说明并提出需要我补充的要点。\n- 如能推断到来源，请在回答中标注相关笔记标题。\n\n笔记本：${notebookName || '未命名'}\n时间范围：${range}\n\n笔记列表（按最近更新时间倒序，已截断）：\n`;
+
+  let used = prompt.length;
+  const lines = [];
+  (notes || []).forEach((note, index) => {
+    const title = sanitizeString(note.title, '未命名笔记') || '未命名笔记';
+    const date = String(note.updated_at || note.created_at || '').slice(0, 10);
+    const snippet = truncateText(flattenNoteText(note), 420);
+    const line = `${index + 1}. [${date || '未知日期'}] 《${title}》：${snippet}`;
+    lines.push(line);
+  });
+
+  for (const line of lines) {
+    if (used + line.length + 1 > maxChars) break;
+    prompt += `${line}\n`;
+    used += line.length + 1;
+  }
+
+  return prompt.trim();
+};
+
+const buildCustomFieldPrompt = (fieldName, instructions, notesForPrompt, meta) => {
+  const roleDesc =
+    meta.role === 'metric'
+      ? '数值指标（返回数字，可带小数）'
+      : '文本维度（返回不超过20字的中文或英文短语）';
+  const intro = `你是一名数据分析助手。请为字段「${fieldName}」生成每条笔记对应的字段值。\n字段角色：${roleDesc}\n字段说明：${instructions || '用户未提供额外说明，可根据字段名称推断。'}\n输出要求：返回 JSON 数组，每个元素包含 noteId 和 value 字段，只输出 JSON。`;
+  const noteLines = notesForPrompt
+    .map((note, index) => {
+      const snippet = truncateText(note.text, 360);
+      return `${index + 1}. noteId: ${note.noteId}\n标题: ${note.title || '未命名'}\n内容: ${snippet}`;
+    })
+    .join('\n---\n');
+  const example =
+    meta.role === 'metric'
+      ? '[{"noteId":"note-1","value":7.3},{"noteId":"note-2","value":4}]'
+      : '[{"noteId":"note-1","value":"项目复盘"},{"noteId":"note-2","value":"家庭时光"}]';
+  return `${intro}\n示例：${example}\n\n笔记列表：\n${noteLines}`;
+};
+
+const extractJsonFromText = (text) => {
+  if (!text) return null;
+  const codeBlock = text.match(/```json([\s\S]*?)```/i);
+  if (codeBlock) {
+    return codeBlock[1].trim();
+  }
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    return trimmed;
+  }
+  const firstBrace = trimmed.indexOf('{');
+  const firstBracket = trimmed.indexOf('[');
+  let start = -1;
+  if (firstBracket !== -1 && firstBrace !== -1) {
+    start = Math.min(firstBracket, firstBrace);
+  } else {
+    start = firstBracket !== -1 ? firstBracket : firstBrace;
+  }
+  if (start === -1) return null;
+  return trimmed.slice(start);
+};
+
+const parseCustomFieldAiResponse = (rawText) => {
+  const jsonLike = extractJsonFromText(rawText || '');
+  if (!jsonLike) return null;
+  const parsed = safeJsonParse(jsonLike, null);
+  if (parsed) return parsed;
+  const start = jsonLike.indexOf('[');
+  const end = jsonLike.lastIndexOf(']');
+  if (start !== -1 && end > start) {
+    return safeJsonParse(jsonLike.slice(start, end + 1), null);
+  }
+  return null;
+};
+
+const normalizeCustomFieldValues = (parsed) => {
+  if (!parsed) return null;
+  const map = {};
+  const collect = (item) => {
+    if (!item || typeof item !== 'object') return;
+    const noteId = sanitizeString(item.noteId || item.note_id || item.id || item.noteID);
+    if (!noteId) return;
+    const value =
+      item.value !== undefined
+        ? item.value
+        : item.text !== undefined
+          ? item.text
+          : item.result !== undefined
+            ? item.result
+            : item.content;
+    if (value === undefined || value === null) return;
+    map[noteId] = value;
+  };
+  if (Array.isArray(parsed)) {
+    parsed.forEach(collect);
+    return Object.keys(map).length ? map : null;
+  }
+  if (Array.isArray(parsed?.values)) {
+    parsed.values.forEach(collect);
+    return Object.keys(map).length ? map : null;
+  }
+  if (Array.isArray(parsed?.data)) {
+    parsed.data.forEach(collect);
+    return Object.keys(map).length ? map : null;
+  }
+  if (Array.isArray(parsed?.items)) {
+    parsed.items.forEach(collect);
+    return Object.keys(map).length ? map : null;
+  }
+  if (parsed && typeof parsed === 'object') {
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        Array.isArray(value)
+      ) {
+        map[sanitizeString(key)] = value;
+      } else if (value && typeof value === 'object') {
+        collect({ noteId: key, value });
+      }
+    });
+    return Object.keys(map).length ? map : null;
+  }
+  return null;
+};
+
+const fallbackCustomFieldValue = (note, meta, fallbackSeed) => {
+  const blob = flattenNoteText(note);
+  if (meta.dataType === 'number') {
+    const detected = detectScoreFromText(blob);
+    if (typeof detected === 'number' && !Number.isNaN(detected)) {
+      return Number(detected.toFixed(2));
+    }
+    const seed = `${fallbackSeed}-${blob.slice(0, 20)}`;
+    return Number(((hashString(seed) % 1000) / 10).toFixed(2));
+  }
+  const keywords = extractKeywords(blob);
+  if (keywords.length) {
+    return keywords.slice(0, 3).join('、');
+  }
+  if (blob) {
+    return truncateText(blob, 24);
+  }
+  return '无';
+};
+
+const formatCustomFieldValue = (value, meta) => {
+  if (value === undefined || value === null) return null;
+  if (meta.dataType === 'number') {
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(numeric)) {
+      return Number(numeric.toFixed(4));
+    }
+    if (Array.isArray(value) && value.length) {
+      const firstNumber = Number(value[0]);
+      return Number.isFinite(firstNumber) ? Number(firstNumber.toFixed(4)) : null;
+    }
+    return null;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (item === null || item === undefined) return '';
+        if (typeof item === 'string') return item.trim();
+        if (typeof item === 'number') return String(item);
+        if (typeof item === 'object' && typeof item.value === 'string') return item.value.trim();
+        if (typeof item === 'object' && typeof item.text === 'string') return item.text.trim();
+        return JSON.stringify(item);
+      })
+      .filter(Boolean)
+      .join('、');
+  }
+  if (typeof value === 'object') {
+    if (typeof value.value === 'string') return value.value.trim();
+    if (typeof value.text === 'string') return value.text.trim();
+    return JSON.stringify(value);
+  }
+  return String(value).trim();
 };
 
 const buildMoodAnalysisDataset = (notes = []) => {
@@ -788,6 +1069,93 @@ app.get('/api/notes', async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || '获取笔记失败'
+    });
+  }
+});
+
+// 笔记本 AI 助手对话（用于前端“AI总结和建议”）
+app.post('/api/notebooks/:id/assistant-chat', async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        message: '数据库未连接'
+      });
+    }
+
+    const notebookId = sanitizeString(req.params?.id);
+    if (!notebookId) {
+      return res.status(400).json({
+        success: false,
+        message: '缺少 notebookId'
+      });
+    }
+
+    const messages = normalizeAssistantMessages(req.body?.messages);
+    if (!messages.length) {
+      return res.status(400).json({
+        success: false,
+        message: '请提供 messages'
+      });
+    }
+
+    const startDate = sanitizeString(req.body?.startDate);
+    const endDate = sanitizeString(req.body?.endDate);
+    const rawNoteIds = Array.isArray(req.body?.noteIds)
+      ? req.body.noteIds
+      : Array.isArray(req.body?.note_ids)
+        ? req.body.note_ids
+        : typeof req.body?.noteIds === 'string'
+          ? req.body.noteIds.split(',')
+          : typeof req.body?.note_ids === 'string'
+            ? req.body.note_ids.split(',')
+            : [];
+    const selectedNoteIds = rawNoteIds
+      .map((id) => sanitizeString(id))
+      .filter((id, index, self) => Boolean(id) && self.indexOf(id) === index);
+
+    const notebook = await getNotebookById(notebookId);
+    const notebookName = notebook?.name || '当前笔记本';
+
+    const params = [notebookId];
+    let where = 'WHERE notebook_id = ?';
+    if (startDate && endDate) {
+      where += ' AND date(updated_at) >= date(?) AND date(updated_at) <= date(?)';
+      params.push(startDate, endDate);
+    }
+    if (selectedNoteIds.length) {
+      const placeholders = selectedNoteIds.map(() => '?').join(', ');
+      where += ` AND note_id IN (${placeholders})`;
+      params.push(...selectedNoteIds);
+    }
+
+    const notes = await db.all(
+      `SELECT ${NOTE_FIELDS} FROM notes ${where} ORDER BY updated_at DESC LIMIT 200`,
+      params
+    );
+
+    const systemPrompt = buildNotebookAssistantSystemPrompt({
+      notebookName,
+      notes,
+      startDate: startDate && endDate ? startDate : null,
+      endDate: startDate && endDate ? endDate : null
+    });
+
+    const reply = await aiService.generateText('notebook-assistant-chat', {
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+      temperature: 0.4,
+      maxTokens: 1400
+    });
+
+    return res.json({
+      success: true,
+      reply: reply || ''
+    });
+  } catch (error) {
+    console.error('❌ /api/notebooks/:id/assistant-chat 失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || 'assistant chat failed'
     });
   }
 });
@@ -1844,6 +2212,123 @@ app.post('/api/notebooks/:id/ai-fields', async (req, res) => {
   }
 });
 
+// ==================== 自定义 AI 字段（基于选中笔记） ====================
+
+app.post('/api/notebooks/:id/custom-ai-field', async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ success: false, error: '数据库未连接' });
+    }
+
+    const notebookId = sanitizeString(req.params.id);
+    if (!notebookId) {
+      return res.status(400).json({ success: false, error: '请提供 notebook_id' });
+    }
+
+    const notebook = await getNotebookById(notebookId);
+    if (!notebook) {
+      return res.status(404).json({ success: false, error: '笔记本不存在' });
+    }
+
+    const rawFieldName = sanitizeString(req.body?.fieldName || req.body?.field_name);
+    const rawInstructions = sanitizeString(req.body?.instructions || req.body?.desc || '');
+    const rawRole = sanitizeString(req.body?.fieldRole || req.body?.field_role || '');
+    const rawDataType = sanitizeString(req.body?.fieldDataType || req.body?.field_data_type || '');
+
+    if (!rawFieldName) {
+      return res.status(400).json({ success: false, error: '请提供字段名称 fieldName' });
+    }
+
+    const role = rawRole === 'metric' || rawRole === 'dimension' ? rawRole : null;
+    const dataType =
+      rawDataType && ['date', 'number', 'text', 'category'].includes(rawDataType)
+        ? rawDataType
+        : null;
+    const meta = inferFieldMetaFromName(rawFieldName, role, dataType);
+
+    const rawNoteIds = Array.isArray(req.body?.noteIds || req.body?.note_ids)
+      ? (req.body.noteIds || req.body.note_ids).map((id) => String(id)).filter(Boolean)
+      : [];
+
+    if (!rawNoteIds.length) {
+      return res.status(400).json({ success: false, error: '请提供至少一条笔记 noteIds' });
+    }
+
+    const placeholders = rawNoteIds.map(() => '?').join(',');
+    const notes = await db.all(
+      `SELECT ${NOTE_FIELDS} FROM notes WHERE notebook_id = ? AND note_id IN (${placeholders})`,
+      [notebookId, ...rawNoteIds]
+    );
+
+    if (!notes || !notes.length) {
+      return res.status(404).json({ success: false, error: '未找到对应的笔记' });
+    }
+
+    const promptNotes = notes.map((note) => ({
+      noteId: String(note.note_id || note.id),
+      title: note.title || '',
+      text: flattenNoteText(note)
+    }));
+
+    let valueMap = {};
+    let usedAi = false;
+
+    try {
+      const prompt = buildCustomFieldPrompt(rawFieldName, rawInstructions, promptNotes, meta);
+      const aiResponse = await aiService.generateText(prompt, {
+        temperature: meta.role === 'metric' ? 0.2 : 0.5,
+        maxTokens: 1200
+      });
+      const parsed = parseCustomFieldAiResponse(aiResponse);
+      const normalized = normalizeCustomFieldValues(parsed);
+      if (normalized && Object.keys(normalized).length) {
+        valueMap = normalized;
+        usedAi = true;
+      }
+    } catch (aiError) {
+      console.warn('⚠️ 自定义字段 AI 生成失败，使用规则兜底:', aiError?.message || aiError);
+    }
+
+    // 兜底：对缺失的笔记使用规则推导
+    const resultValues = {};
+    notes.forEach((note, index) => {
+      const key = String(note.note_id || note.id);
+      const rawValue = valueMap[key];
+      const formatted = formatCustomFieldValue(rawValue, meta);
+      if (formatted !== null && formatted !== undefined && formatted !== '') {
+        resultValues[key] = formatted;
+      } else {
+        const fallbackSeed = `${notebookId}-${rawFieldName}-${index}`;
+        resultValues[key] = formatCustomFieldValue(
+          fallbackCustomFieldValue(note, meta, fallbackSeed),
+          meta
+        );
+      }
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        field: {
+          name: rawFieldName,
+          role: meta.role,
+          dataType: meta.dataType,
+          source: 'custom',
+          description: rawInstructions || 'AI 基于选中笔记生成的自定义字段',
+          usedAi
+        },
+        values: resultValues
+      }
+    });
+  } catch (error) {
+    console.error('❌ 生成自定义 AI 字段失败:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || '生成自定义 AI 字段失败'
+    });
+  }
+});
+
 // ==================== 分析相关 API ====================
 
 // 获取所有分析结果
@@ -2131,13 +2616,38 @@ app.delete('/api/analysis/:analysisId', async (req, res) => {
       });
     }
 
-    await db.run('DELETE FROM analysis_results WHERE id = ?', [analysisId]);
+    // 语义：从“管理分析结果”删除时，视为删除该笔记本的分析结果与相关配置
+    const notebookId = analysis.notebook_id;
+    let deletedResults = 0;
+    let deletedConfigs = 0;
 
-    console.log(`✅ 成功删除分析结果: ${analysisId}`);
+    if (notebookId) {
+      const resultDelete = await db.run('DELETE FROM analysis_results WHERE notebook_id = ?', [
+        notebookId
+      ]);
+      deletedResults = resultDelete?.changes || 0;
+
+      const configDelete = await db.run('DELETE FROM ai_analysis_setting WHERE notebook_id = ?', [
+        notebookId
+      ]);
+      deletedConfigs = configDelete?.changes || 0;
+    } else {
+      const resultDelete = await db.run('DELETE FROM analysis_results WHERE id = ?', [analysisId]);
+      deletedResults = resultDelete?.changes || 0;
+    }
+
+    console.log(
+      `✅ 成功删除分析结果: ${analysisId} (notebook: ${notebookId || 'unknown'}, results: ${deletedResults}, configs: ${deletedConfigs})`
+    );
 
     res.json({
       success: true,
-      message: '分析结果删除成功'
+      message: '分析结果删除成功',
+      data: {
+        notebookId: notebookId || null,
+        deletedResults,
+        deletedConfigs
+      }
     });
   } catch (error) {
     console.error('❌ 删除分析结果失败:', error);
@@ -2966,6 +3476,10 @@ async function startServer() {
     const parseRouter = initParseRoutes(db);
     app.use('/', parseRouter);
 
+    // 注册 AI 图表分析 V3 路由（推荐/字段择优/字段生成）
+    const aiChartRouter = initAIChartV3Routes({ aiService });
+    app.use('/', aiChartRouter);
+
     // 启动服务器
     app.listen(PORT, () => {
       console.log(`[backend] listening on http://localhost:${PORT}`);
@@ -2980,6 +3494,10 @@ async function startServer() {
       console.log('  - GET /api/analysis');
       console.log('  - GET /api/analysis/:id');
       console.log('  - DELETE /api/analysis/:id');
+      console.log('🧩 AI 图表分析 V3 已启用:');
+      console.log('  - POST /api/ai-chart/recommend');
+      console.log('  - POST /api/ai-chart/rerank');
+      console.log('  - POST /api/ai-chart/derive-fields');
     });
   } catch (error) {
     console.error('❌ 服务器启动失败:', error);

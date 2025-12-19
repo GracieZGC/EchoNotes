@@ -18,6 +18,56 @@ code {
     monospace;
 }
 
+input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid #06c3a8;
+  border-radius: 4px;
+  background-color: transparent;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 10px;
+  border: solid transparent;
+  border-width: 0 2px 2px 0;
+  transform: translate(-50%, -60%) rotate(45deg) scale(0);
+  transform-origin: center;
+  top: 50%;
+  left: 50%;
+  transition: transform 0.15s ease;
+}
+
+input[type='checkbox']:checked::after {
+  border-color: #06c3a8;
+  transform: translate(-50%, -60%) rotate(45deg) scale(1);
+}
+
+input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(6, 195, 168, 0.25);
+}
+
+input[type='checkbox']:disabled {
+  border-color: #cbd5f5;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+input[type='radio'] {
+  accent-color: #06c3a8;
+}
+
 /* 隐藏所有滚动条但保持滚动功能 */
 * {
   scrollbar-width: none; /* Firefox */

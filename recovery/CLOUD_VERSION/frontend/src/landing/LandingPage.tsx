@@ -1,12 +1,10 @@
-import React, { useCallback } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import LandingHeroParseSection from '../components/LandingHeroParseSection';
+import TopNavigation from '../components/TopNavigation';
 
 const LandingPage: React.FC = () => {
   const navigate = useNavigate();
-  const scrollToFeatures = useCallback(() => {
-    if (typeof window === 'undefined') return;
-    document.getElementById('features')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, []);
 
   const features = [
     {
@@ -63,62 +61,18 @@ const LandingPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#eef6fd] pt-0 pb-4">
-      {/* Navigation */}
-      <div className="sticky top-0 z-50 border-b border-[#e0f1fb] bg-[#f8fcff]/80 backdrop-blur">
-        <div className="mx-auto w-full max-w-[1400px] px-[10px]">
-          {/* 关键：Nav 高度固定 72px，避免 Hero calc 失真 */}
-          <nav className="mx-auto flex h-[72px] w-full max-w-[1200px] flex-wrap items-center px-6 py-0">
-            <div className="flex items-center">
-              <div className="w-[9ch]">
-                <div className="flex justify-between text-lg font-semibold text-slate-900">
-                  {'回响笔记'.split('').map((char, index) => (
-                    <span key={`${char}-${index}`}>{char}</span>
-                  ))}
-                </div>
-                <div className="flex justify-between whitespace-nowrap text-xs text-slate-400">
-                  {'Echo Notes'.split('').map((char, index) => (
-                    <span key={`${char}-${index}`}>
-                      {char === ' ' ? '\u00A0' : char}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="ml-auto flex items-center gap-10">
-            <div className="hidden items-center gap-10 text-sm font-medium text-slate-600 lg:flex">
-              {['产品功能', '使用指南', '联系我们'].map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={item === '产品功能' ? scrollToFeatures : undefined}
-                  className="transition-colors hover:text-[#06c3a8]"
-                >
-                  {item}
-                </button>
-              ))}
-              </div>
-              <button
-                type="button"
-                className="rounded-full bg-[#06c3a8] px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-[#8de2d5] hover:bg-[#04b094]"
-              >
-                登录/注册
-              </button>
-            </div>
-          </nav>
-        </div>
-      </div>
+      <TopNavigation />
 
       <div className="mx-auto w-full max-w-[1400px] px-[10px]">
         {/* Hero */}
-        <section className="min-h-[calc(100vh-72px)] pb-[64px]">
+        <section className="min-h-[calc(100vh-56px)] pb-[64px]">
           {/* 这里 pt 你原来的值保留，避免你说的“顶/不顶”反复 */}
           <div className="mx-auto w-full max-w-[1200px] px-6 pt-[50px] xl:pt-[40px]">
             {/* 关键：不要再用左列 -mt；用 grid 整体上移，让文字+插画一起动 */}
             <div className="grid items-center gap-10 lg:grid-cols-2 xl:grid-cols-[1.1fr_1fr] xl:gap-x-[48px]">
               <div className="flex flex-col justify-center">
                 <h1 className="mb-[18px] text-[96px] font-semibold leading-[1.22] tracking-[1.5px] text-[#0a223d] md:text-[72px]">
-                  让内容，变有序
+                  让内容，更有序
                 </h1>
                 <p className="mb-[18px] text-[40px] font-medium leading-[1.4] tracking-[1.5px] text-[#06c3a8] md:text-[44px]">
                   AI 自动整理
@@ -128,7 +82,7 @@ const LandingPage: React.FC = () => {
                 </p>
                 <div className="flex flex-wrap gap-4">
                   <button
-                    onClick={() => navigate('/ai-import')}
+                    onClick={() => navigate('/workspace')}
                     className="w-full rounded-full bg-[#06c3a8] px-8 py-4 text-lg font-semibold tracking-[1.5px] text-white shadow-xl shadow-[#9ee3d8] transition hover:bg-[#04b094] sm:w-auto"
                   >
                     立即试用
@@ -144,14 +98,17 @@ const LandingPage: React.FC = () => {
                 />
               </div>
             </div>
+
+            <div className="mt-10">
+              <LandingHeroParseSection />
+            </div>
           </div>
         </section>
 
         {/* Features */}
         <section id="features" className="relative scroll-mt-[88px]">
           <div className="mx-auto w-full max-w-[1200px] px-4">
-            <div className="-mt-[128px] rounded-[32px] border border-[#e0f1fb] bg-white/80 backdrop-blur shadow-[0_20px_60px_rgba(10,34,61,0.08)]">
-              {/* 关键：把标题区整体往上挪一点（两种手段叠加，幅度很克制） */}
+            <div className="mt-16 rounded-[32px] border border-[#e0f1fb] bg-white/80 backdrop-blur shadow-[0_20px_60px_rgba(10,34,61,0.08)]">
               <div className="px-6 pb-10 pt-8 md:px-10 md:pb-12 md:pt-9">
                 <div className="-mt-2 flex flex-col items-center gap-2 text-center md:-mt-3">
                   <p className="flex items-center justify-center gap-2 text-[30px] font-semibold tracking-[1.5px] text-[#06c3a8]">
@@ -172,7 +129,7 @@ const LandingPage: React.FC = () => {
                     <span>核心能力</span>
                   </p>
                   <h2 className="mt-2 text-[20px] font-semibold leading-[1.25] tracking-[1.5px] text-[#0a223d]">
-                    零散的信息，交给 AI 理清
+                    碎片化信息，AI一键整理
                   </h2>
                 </div>
 

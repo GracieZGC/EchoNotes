@@ -919,6 +919,43 @@ class ApiClient {
       throw error;
     }
   }
+
+  // =========================
+  // AI 图表分析 V3（推荐/字段择优/字段生成）
+  // =========================
+
+  async recommendAIChart(payload: {
+    fields: Array<{ name: string; role?: string; data_type?: string; source?: string; example?: string }>;
+    notes_sample: Array<{ id?: string; title?: string; excerpt?: string; created_at?: string }>;
+    semantic_profile?: Record<string, any>;
+    policy_overrides?: Record<string, any>;
+    fixed_vocabularies?: Record<string, any>;
+  }): Promise<any> {
+    const response = await this.post('/api/ai-chart/recommend', payload);
+    return response.data;
+  }
+
+  async rerankAIChartFields(payload: {
+    chart_type: 'line' | 'bar' | 'pie' | 'heatmap';
+    candidate_fields: Record<string, any>;
+    field_stats?: Record<string, any>;
+    semantic_profile?: Record<string, any>;
+    policy_overrides?: Record<string, any>;
+    fixed_vocabularies?: Record<string, any>;
+  }): Promise<any> {
+    const response = await this.post('/api/ai-chart/rerank', payload);
+    return response.data;
+  }
+
+  async deriveAIChartFields(payload: {
+    missing_fields: Array<Record<string, any>>;
+    notes: Array<{ id: string; title?: string; excerpt?: string; content_excerpt?: string }>;
+    policy_overrides?: Record<string, any>;
+    fixed_vocabularies?: Record<string, any>;
+  }): Promise<any> {
+    const response = await this.post('/api/ai-chart/derive-fields', payload);
+    return response.data;
+  }
 }
 
 // 创建默认实例

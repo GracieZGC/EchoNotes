@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import type { FieldTemplateField, FieldTemplateSource } from '../types/fieldTemplate';
 
 interface FieldTemplateModalProps {
@@ -16,6 +16,8 @@ interface FieldTemplateModalProps {
   onClearAll: () => void;
   onReset: () => void;
   onSave: () => Promise<void> | void;
+  aiSummaryPrompt?: string;
+  onAiSummaryPromptChange?: (nextPrompt: string) => void;
 }
 
 const sourceLabels: Record<FieldTemplateSource, string> = {
@@ -37,12 +39,27 @@ const FieldTemplateModal: React.FC<FieldTemplateModalProps> = ({
   onSelectAll,
   onClearAll,
   onReset,
-  onSave
+  onSave,
+  aiSummaryPrompt,
+  onAiSummaryPromptChange
 }) => {
   if (!isOpen) return null;
 
   const sortedFields = [...fields].sort((a, b) => a.order - b.order);
   const allowActions = !loading && !saving;
+  const [isEditingPrompt, setIsEditingPrompt] = useState(false);
+  const [promptDraft, setPromptDraft] = useState(aiSummaryPrompt || '');
+
+  useEffect(() => {
+    if (isEditingPrompt) return;
+    setPromptDraft(aiSummaryPrompt || '');
+  }, [aiSummaryPrompt, isEditingPrompt]);
+
+  const handlePromptSave = () => {
+    if (!onAiSummaryPromptChange) return;
+    onAiSummaryPromptChange(promptDraft);
+    setIsEditingPrompt(false);
+  };
 
   const handleSaveClick = async () => {
     try {
@@ -110,25 +127,82 @@ const FieldTemplateModal: React.FC<FieldTemplateModalProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              {sortedFields.map((field) => (
-                <label
-                  key={field.key}
-                  className={`flex items-center gap-3 rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors ${
-                    field.enabled !== false
-                      ? 'border-[#b5ece0] bg-[#eef6fd] text-[#062b23]'
-                      : 'border-slate-200 bg-white text-slate-600'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={field.enabled !== false}
-                    disabled={!allowActions}
-                    onChange={() => onToggleField(field.key)}
-                    className="h-4 w-4 rounded border-slate-300 text-[#0a917a] focus:ring-[#43ccb0]"
-                  />
-                  <span>{field.label}</span>
-                </label>
-              ))}
+              {sortedFields.map((field) => {
+                const isSummaryField = field.key === 'summary' && aiSummaryPrompt !== undefined;
+                return (
+                  <div
+                    key={field.key}
+                    className={`rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors ${
+                      field.enabled !== false
+                        ? 'border-[#b5ece0] bg-[#eef6fd] text-[#062b23]'
+                        : 'border-slate-200 bg-white text-slate-600'
+                    }`}
+                  >
+                    <label className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        checked={field.enabled !== false}
+                        disabled={!allowActions}
+                        onChange={() => onToggleField(field.key)}
+                        className="h-4 w-4 rounded border-slate-300 text-[#0a917a] focus:ring-[#43ccb0]"
+                      />
+                      <span>{field.label}</span>
+                    </label>
+                    {isSummaryField && onAiSummaryPromptChange && (
+                      <div className="ml-7 mt-2 space-y-2 text-xs text-slate-600">
+                        {isEditingPrompt ? (
+                          <>
+                            <textarea
+                              className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:outline-none focus:border-[#43ccb0] focus:ring-1 focus:ring-[#b5ece0]"
+                              rows={3}
+                              value={promptDraft}
+                              onChange={(e) => setPromptDraft(e.target.value)}
+                            />
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="rounded-lg bg-[#06c3a8] px-3 py-1.5 text-[11px] font-medium text-white shadow-sm hover:bg-[#04b094]"
+                                onClick={handlePromptSave}
+                              >
+                                保存
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                                onClick={() => {
+                                  setPromptDraft(aiSummaryPrompt || '');
+                                  setIsEditingPrompt(false);
+                                }}
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="rounded-lg border border-slate-200 bg-white/80 px-3 py-2 text-[11px] text-slate-600 leading-relaxed whitespace-pre-line">
+                              {aiSummaryPrompt}
+                            </div>
+                            <button
+                              type="button"
+                              className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 transition-colors"
+                              onClick={() => {
+                                setPromptDraft(aiSummaryPrompt || '');
+                                setIsEditingPrompt(true);
+                              }}
+                            >
+                              编辑提示词
+                            </button>
+                          </>
+                        )}
+                        <p className="text-[11px] text-slate-400">
+                          将用于生成 AI 总结，例如「请将内容整理为不超过 5 条要点」。
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
