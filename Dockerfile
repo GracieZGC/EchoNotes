@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-dev \
   && rm -rf /var/lib/apt/lists/*
 
-COPY recovery/CLOUD_VERSION/backend/package.json recovery/CLOUD_VERSION/backend/package-lock.json ./
-RUN npm ci --omit=dev
+COPY recovery/CLOUD_VERSION/backend/package.json ./
+RUN npm install --omit=dev
 
 COPY recovery/CLOUD_VERSION/backend/src ./src
 
