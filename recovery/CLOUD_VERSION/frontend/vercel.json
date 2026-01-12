@@ -3,6 +3,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://echonotes0112.fly.dev/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }
