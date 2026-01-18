@@ -16,6 +16,7 @@ import { initAuthRoutes } from './routes/auth.js';
 import AIService from './services/ai-service.js';
 import { startTursoSync, importFromTurso } from './services/turso-sync.js';
 import { sanitizeString } from './lib/string-utils.js';
+import fs from 'fs';
 import {
   buildDefaultFieldTemplate,
   sanitizeTemplateSource,
@@ -81,6 +82,15 @@ if (!envLoaded) {
 const app = express();
 const PORT = process.env.PORT || 3001;
 let httpServer = null;
+
+// 上传目录（用于“上传文件转写”场景：需要配合 PUBLIC_BASE_URL 让第三方可拉取）
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+} catch (e) {
+  console.warn('⚠️ 创建上传目录失败:', UPLOAD_DIR, e?.message || e);
+}
+app.use('/uploads', express.static(UPLOAD_DIR));
 
 const buildCorsOptions = () => {
   const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';

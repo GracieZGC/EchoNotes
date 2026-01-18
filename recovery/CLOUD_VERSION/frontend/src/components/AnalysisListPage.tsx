@@ -62,6 +62,8 @@ const normalizeNotebookType = (value: unknown): AnalysisFilterType => {
 
 const getNotebookIdFromAnalysis = (analysis: AnalysisResult) =>
   analysis.metadata?.dataSource?.notebookId || (analysis as any).notebookId || '';
+const getHistoryIdFromAnalysis = (analysis: AnalysisResult) =>
+  analysis.metadata?.dataSource?.historyId || (analysis as any).historyId || '';
 
 const getAnalysisUpdatedAtMs = (analysis: AnalysisResult) => {
   const updatedAt =
@@ -158,9 +160,11 @@ const buildAnalysesFromV2History = (history: AnalysisV2HistoryRecord[]): Analysi
         dataSource: {
           notebookId: record.notebookId,
           noteIds,
-          recordCount
+          recordCount,
+          historyId: record.id
         }
-      }
+      },
+      historyId: record.id
     } as any as AnalysisResult;
   });
 };
@@ -215,21 +219,26 @@ const AnalysisItem = ({
   const componentCount = getComponentsCount();
 
   const componentLabelMap: Record<string, string> = {
-    chart: '图表',
-    'ai-custom': 'AI分析',
-    insight: 'AI分析',
+    chart: 'AI图表',
+    'ai-custom': 'AI洞察',
+    insight: 'AI洞察',
     summary: '摘要',
     trend: '趋势'
   };
 
   const metrics = [
     { label: '分析笔记', value: `${getNoteCount() ?? '—'} 条` },
-    { 
-      label: '分析组件', 
-      value: `${componentCount || 0} 个`,
+    {
+      label: '分析组件',
+      hideMetricText: true,
       components: analysis.selectedAnalysisComponents || []
     }
   ];
+  const visibleMetrics = metrics.filter((metric) => {
+    const hasText = Boolean(metric.label && metric.value && !metric.hideMetricText);
+    const hasComponents = Array.isArray(metric.components) && metric.components.length > 0;
+    return hasText || hasComponents;
+  });
 
   const handleShare = async () => {
     if (onShare) {
@@ -262,25 +271,32 @@ const AnalysisItem = ({
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-base font-semibold text-gray-900">{displayTitle}</h3>
-                {metrics.map(metric => (
-                <span key={metric.label} className="inline-flex items-center gap-1 text-sm text-slate-700">
-                  <span className="text-slate-400">·</span>
-                  <span className="text-slate-500 whitespace-nowrap">{metric.label}</span>
-                  <span className="font-medium text-[#0a917a] whitespace-nowrap">{metric.value}</span>
-                  {metric.components && metric.components.length > 0 && (
-                    <span className="inline-flex items-center gap-1 flex-wrap">
-                      {metric.components.map((component: string) => (
-                        <span
-                          key={component}
-                          className="px-2 py-0.5 rounded-full text-xs font-medium bg-[#eef6fd] text-[#0a917a] border border-[#d4f3ed]"
-                        >
-                          {componentLabelMap[component] || component}
+                {visibleMetrics.map((metric) => {
+                  const showMetricText = Boolean(metric.label && metric.value && !metric.hideMetricText);
+                  return (
+                    <span key={metric.label} className="inline-flex items-center gap-1 text-sm text-slate-700">
+                      {showMetricText && (
+                        <>
+                          <span className="text-slate-400">·</span>
+                          <span className="text-slate-500 whitespace-nowrap">{metric.label}</span>
+                          <span className="font-medium text-[#0a917a] whitespace-nowrap">{metric.value}</span>
+                        </>
+                      )}
+                      {metric.components && metric.components.length > 0 && (
+                        <span className={`inline-flex items-center gap-1 flex-wrap ${showMetricText ? '' : 'ml-1'}`}>
+                          {metric.components.map((component: string) => (
+                            <span
+                              key={component}
+                              className="px-2 py-0.5 rounded-full text-xs font-medium bg-[#eef6fd] text-[#0a917a] border border-[#d4f3ed]"
+                            >
+                              {componentLabelMap[component] || component}
+                            </span>
+                          ))}
                         </span>
-                      ))}
+                      )}
                     </span>
-                  )}
-                </span>
-              ))}
+                  );
+                })}
               </div>
               <div className="text-xs text-slate-400 flex flex-col sm:flex-row sm:items-center gap-2">
                 <div>创建时间：{formattedCreatedAt}</div>
@@ -585,7 +601,12 @@ const AnalysisListPage: React.FC = () => {
   const handleShareAnalysis = useCallback(
     async (analysis: AnalysisResult) => {
       const rawNotebookId = getNotebookIdFromAnalysis(analysis);
-      const url = rawNotebookId ? `${window.location.origin}/analysis/v2/${rawNotebookId}` : getFullAnalysisUrl(analysis.id);
+      const historyId = getHistoryIdFromAnalysis(analysis);
+      const url = rawNotebookId
+        ? `${window.location.origin}/analysis/v2/${rawNotebookId}${
+            historyId ? `?historyId=${encodeURIComponent(historyId)}` : ''
+          }`
+        : getFullAnalysisUrl(analysis.id);
       const ok = await copyTextToClipboard(url);
       if (ok) {
         showNotice('分析链接已复制');
@@ -749,6 +770,7 @@ const AnalysisListPage: React.FC = () => {
             const rawNotebookId = analysis.metadata?.dataSource?.notebookId
               || (analysis as any).notebookId
               || '';
+            const historyId = getHistoryIdFromAnalysis(analysis);
             const resolvedName = rawNotebookId ? notebookNames[rawNotebookId] : undefined;
 
             return (
@@ -764,7 +786,9 @@ const AnalysisListPage: React.FC = () => {
                 }}
                 onAnalysisClick={() => {
                   if (rawNotebookId) {
-                    navigate(`/analysis/v2/${rawNotebookId}`);
+                    navigate(
+                      `/analysis/v2/${rawNotebookId}${historyId ? `?historyId=${encodeURIComponent(historyId)}` : ''}`
+                    );
                   } else {
                     // 兼容旧数据：没有 notebookId 时仍然跳转到分析详情页
                     navigate(`/analysis/${analysis.id}`);

@@ -64,6 +64,7 @@ export interface AnalysisResult {
         from: string;
         to: string;
       };
+      historyId?: string;
     };
   };
   analysisData?: any;

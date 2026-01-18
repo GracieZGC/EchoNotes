@@ -118,6 +118,7 @@ const LandingHeroParseSection: React.FC = () => {
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [isCardHover, setIsCardHover] = useState(false);
   const [hoverBubbleId, setHoverBubbleId] = useState<string | null>(null);
+  const [pendingAuthStart, setPendingAuthStart] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -236,13 +237,30 @@ const LandingHeroParseSection: React.FC = () => {
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [modeMenuOpen]);
 
+  useEffect(() => {
+    if (!pendingAuthStart || !user) return;
+    setPendingAuthStart(false);
+    navigate('/workspace');
+  }, [navigate, pendingAuthStart, user]);
+
   const handleStartParse = () => {
+    const trimmed = inputValue.trim();
     if (!user) {
+      if (trimmed) {
+        setWorkspaceStartAction({
+          source: 'landing',
+          mode,
+          inputValue: trimmed,
+          activeSceneId
+        });
+        setPendingAuthStart(true);
+      } else {
+        setPendingAuthStart(false);
+      }
       openAuthModal('login');
       return;
     }
 
-    const trimmed = inputValue.trim();
     if (!trimmed) return;
 
     setWorkspaceStartAction({

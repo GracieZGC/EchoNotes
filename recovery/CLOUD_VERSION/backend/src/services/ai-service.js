@@ -10,6 +10,8 @@ const normalizeBoolean = (value) => {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export default class AIService {
   constructor() {
     // 统一的提供商优先级（环境变量控制）
@@ -153,31 +155,49 @@ export default class AIService {
    * @private
    */
   async _callDoubaoAPI(messages, options = {}) {
-    try {
-      const response = await fetch(`${this.doubaoBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.doubaoApiKey}`
-        },
-        body: JSON.stringify({
-          model: this.doubaoModel,
-          messages,
-          temperature: options.temperature || 0.7,
-          max_tokens: options.maxTokens || 2000
-        })
-      });
+    const maxAttempts = Math.max(1, Number(process.env.DOUBAO_RETRY_TIMES || 3));
+    const baseDelayMs = Math.max(200, Number(process.env.DOUBAO_RETRY_DELAY_MS || 600));
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(`${this.doubaoBaseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.doubaoApiKey}`
+          },
+          body: JSON.stringify({
+            model: this.doubaoModel,
+            messages,
+            temperature: options.temperature || 0.7,
+            max_tokens: options.maxTokens || 2000
+          })
+        });
 
-      if (!response.ok) {
-        throw new Error(`Doubao API error: ${response.status}`);
+        if (!response.ok) {
+          const preview = await response.text().catch(() => '');
+          const error = new Error(`Doubao API error: ${response.status} ${preview.slice(0, 200)}`);
+          if (response.status === 429 || response.status >= 500) {
+            throw error;
+          }
+          throw error;
+        }
+
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content || '';
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          await sleep(baseDelayMs * attempt);
+          continue;
+        }
+        console.error('❌ 豆包 API 调用失败:', error);
+        throw error;
       }
-
-      const data = await response.json();
-      return data.choices[0].message.content;
-    } catch (error) {
-      console.error('❌ 豆包 API 调用失败:', error);
-      throw error;
     }
+
+    console.error('❌ 豆包 API 调用失败:', lastError);
+    throw lastError;
   }
 
   /**
@@ -397,18 +417,18 @@ ${text}
   async generateInsights(notebookType, customPrompt, notes) {
     try {
       if (!notes || notes.length === 0) {
-        return this.getEmptyInsights();
+        throw new Error('没有可分析的笔记');
       }
 
-      // 如果没有可用的外部AI服务，使用规则驱动的洞察生成
+      // 如果没有可用的外部AI服务，直接报错
       const hasAIService = this.openaiApiKey || this.anthropicApiKey || this.doubaoConfigured;
       if (!hasAIService) {
-        console.warn('⚠️ [generateInsights] 没有配置AI服务，使用规则驱动的洞察');
-        return this.generateRuleBasedInsights(notebookType, notes);
+        console.warn('⚠️ [generateInsights] 没有配置AI服务，终止洞察生成');
+        throw new Error('AI服务未配置');
       }
 
       // 准备笔记数据摘要
-      const notesSummary = this.prepareNotesSummary(notes);
+      const notesSummary = this.prepareNotesSummary(notes, notebookType);
       
       // 构建完整的 prompt：由调用侧决定输出格式与约束（此处只拼接数据摘要）
       const promptHeader = (customPrompt && typeof customPrompt === 'string' && customPrompt.trim())
@@ -419,6 +439,9 @@ ${text}
       // 调用AI服务
       console.log('🤖 [generateInsights] 调用AI服务，prompt长度:', fullPrompt.length);
       const response = await this.callAI(fullPrompt);
+      if (!response || String(response).includes('AI 服务未配置')) {
+        throw new Error('AI服务调用失败');
+      }
       console.log('🤖 [generateInsights] AI返回响应，长度:', response?.length || 0);
       
       // 解析AI响应
@@ -426,9 +449,15 @@ ${text}
         const parsedInsights = this.parseInsightsResponse(response, notebookType);
         console.log('✅ [generateInsights] 解析后的insights数量:', parsedInsights?.length || 0);
         if (parsedInsights && parsedInsights.length > 0) {
+          if (String(notebookType) === 'mood') {
+            const validation = this.validateMoodInsightsOutput(parsedInsights);
+            if (!validation.ok) {
+              throw new Error(`心情洞察不满足规则：${validation.reason}`);
+            }
+          }
           return parsedInsights;
         } else {
-          console.warn('⚠️ [generateInsights] 解析后insights为空，使用规则洞察');
+          console.warn('⚠️ [generateInsights] 解析后insights为空，终止洞察生成');
           throw new Error('解析后insights为空');
         }
       } catch (parseError) {
@@ -437,22 +466,7 @@ ${text}
       }
     } catch (error) {
       console.error('❌ [generateInsights] AI洞察生成失败:', error?.message || error);
-      
-      // 如果是没有API key的情况，直接返回规则洞察
-      const hasAIService = this.openaiApiKey || this.anthropicApiKey || this.doubaoConfigured;
-      if (!hasAIService) {
-        console.log('⚠️ [generateInsights] 没有配置AI服务，使用规则洞察');
-        return this.generateRuleBasedInsights(notebookType, notes || []);
-      }
-      
-      // 如果是API调用错误，优先返回基于真实数据的规则洞察
-      try {
-        console.log('⚠️ [generateInsights] 使用规则洞察作为备选方案');
-        return this.generateRuleBasedInsights(notebookType, notes || []);
-      } catch (e) {
-        console.error('❌ [generateInsights] 规则洞察生成失败，退回默认模板:', e?.message || e);
-        return this.getFallbackInsights(notebookType);
-      }
+      throw error;
     }
   }
 
@@ -515,17 +529,171 @@ ${text}
     return this.formatInsights(insights, notebookType);
   }
 
+  buildMoodSummary(notes = []) {
+    const parsedNotes = Array.isArray(notes) ? notes : [];
+    if (!parsedNotes.length) {
+      return { hasData: false, summary: '' };
+    }
+
+    const positiveWords = ['开心', '高兴', '积极', '愉快', '放松', '满足', '喜悦', '兴奋'];
+    const negativeWords = ['难过', '消极', '低落', '焦虑', '抑郁', '压力', '崩溃', '沮丧', '生气', '疲惫'];
+    const neutralWords = ['中性', '平静', '一般', '普通', '尚可'];
+
+    const normalizeValue = (value) => {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') return value.trim();
+      if (Array.isArray(value)) {
+        return value.map((item) => normalizeValue(item)).filter(Boolean);
+      }
+      if (typeof value === 'object') {
+        return normalizeValue(value.value ?? value.text ?? value.label);
+      }
+      return null;
+    };
+
+    const normalizeList = (value) => {
+      if (value === null || value === undefined) return [];
+      const normalized = normalizeValue(value);
+      if (Array.isArray(normalized)) {
+        return normalized
+          .flatMap((item) => normalizeList(item))
+          .map((item) => String(item).trim())
+          .filter(Boolean);
+      }
+      if (typeof normalized === 'string') {
+        const trimmed = normalized.trim();
+        if (!trimmed) return [];
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            return normalizeList(parsed);
+          } catch {
+            return trimmed.split(/[、，,]/).map((item) => item.trim()).filter(Boolean);
+          }
+        }
+        return trimmed.split(/[、，,]/).map((item) => item.trim()).filter(Boolean);
+      }
+      if (typeof normalized === 'number') return [String(normalized)];
+      return [];
+    };
+
+    const resolveValenceFromText = (text) => {
+      const s = String(text || '');
+      if (!s) return null;
+      if (positiveWords.some((kw) => s.includes(kw))) return 'positive';
+      if (negativeWords.some((kw) => s.includes(kw))) return 'negative';
+      if (neutralWords.some((kw) => s.includes(kw))) return 'neutral';
+      return null;
+    };
+
+    const resolveValence = (note) => {
+      const data = note?.component_data || {};
+      const category = normalizeValue(
+        data.mood_category ?? data.moodCategory ?? data.category ?? data?.mood?.category
+      );
+      const scoreRaw = normalizeValue(
+        data.mood_score ?? data.moodScore ?? data.score ?? data?.mood?.score
+      );
+      const textBlob = [note?.title, note?.content_text, note?.content].filter(Boolean).join(' ');
+
+      if (category) {
+        const byCategory = resolveValenceFromText(category);
+        if (byCategory) return byCategory;
+      }
+
+      const scoreNum = typeof scoreRaw === 'number' ? scoreRaw : Number(scoreRaw);
+      if (Number.isFinite(scoreNum)) {
+        if (scoreNum >= -5 && scoreNum <= 5) {
+          if (scoreNum >= 1) return 'positive';
+          if (scoreNum <= -1) return 'negative';
+          return 'neutral';
+        }
+        if (scoreNum >= 0 && scoreNum <= 10) {
+          if (scoreNum >= 7) return 'positive';
+          if (scoreNum >= 4) return 'neutral';
+          return 'negative';
+        }
+      }
+
+      return resolveValenceFromText(textBlob);
+    };
+
+    const counts = { positive: 0, neutral: 0, negative: 0 };
+    const sourceCount = new Map();
+    const keywordCount = new Map();
+
+    parsedNotes.forEach((note) => {
+      const valence = resolveValence(note);
+      if (valence) counts[valence] += 1;
+
+      const data = note?.component_data || {};
+      const sources = normalizeList(data.mood_source ?? data.moodSource ?? data.mood_event ?? data.moodEvent ?? data.source);
+      sources.forEach((item) => {
+        sourceCount.set(item, (sourceCount.get(item) || 0) + 1);
+      });
+
+      const keywords = normalizeList(data.mood_keywords ?? data.moodKeywords ?? data.keywords);
+      keywords.forEach((item) => {
+        keywordCount.set(item, (keywordCount.get(item) || 0) + 1);
+      });
+    });
+
+    const totalTagged = counts.positive + counts.neutral + counts.negative;
+    if (totalTagged === 0 && sourceCount.size === 0 && keywordCount.size === 0) {
+      return { hasData: false, summary: '' };
+    }
+
+    const dominant = (() => {
+      const entries = Object.entries(counts);
+      const sorted = entries.sort((a, b) => b[1] - a[1]);
+      const [topKey, topValue] = sorted[0] || [];
+      if (!topKey || topValue === 0) return '情绪分布尚不明显';
+      const topLabel = topKey === 'positive' ? '积极' : topKey === 'negative' ? '消极' : '中性';
+      const secondValue = sorted[1]?.[1] ?? 0;
+      if (topValue === secondValue) return '情绪分布较均衡';
+      return `${topLabel}情绪偏多`;
+    })();
+
+    const topSource = [...sourceCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const topKeywords = [...keywordCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([key]) => key);
+
+    const parts = [
+      `情绪分布：积极${counts.positive}、中性${counts.neutral}、消极${counts.negative}`,
+      `主导倾向：${dominant}`
+    ];
+    if (topSource) parts.push(`主要触发源：${topSource}`);
+    if (topKeywords.length) parts.push(`高频情绪关键词：${topKeywords.join('、')}`);
+
+    return { hasData: true, summary: parts.join('；') };
+  }
+
   /**
    * 准备笔记数据摘要
    */
-  prepareNotesSummary(notes) {
+  prepareNotesSummary(notes, notebookType) {
     const totalNotes = notes.length;
     const dateRange = this.getDateRange(notes);
     const contentSummary = this.getContentSummary(notes);
-    
+    const moodSummary =
+      String(notebookType) === 'mood'
+        ? this.buildMoodSummary(notes)
+        : null;
+    if (String(notebookType) === 'mood' && moodSummary && !moodSummary.hasData) {
+      throw new Error('心情内容不足，无法生成洞察');
+    }
+
+    const extraMoodSummary =
+      String(notebookType) === 'mood' && moodSummary?.summary
+        ? `\n心情概况：${moodSummary.summary}`
+        : '';
+
     return `总笔记数：${totalNotes}条
 时间范围：${dateRange}
-内容摘要：${contentSummary}`;
+内容摘要：${contentSummary}${extraMoodSummary}`;
   }
 
   /**
@@ -700,6 +868,38 @@ ${text}
     return insights;
   }
 
+  validateMoodInsightsOutput(insights) {
+    const list = Array.isArray(insights) ? insights : [];
+    const pickSummary = (title) =>
+      String(list.find((item) => item?.title === title)?.summary || '').trim();
+    const primary = pickSummary('主要洞察');
+    const trend = pickSummary('变化趋势');
+    const genericPattern = /(共记录|覆盖时间范围|共有\s*\d+\s*天留下记录|记录习惯|标注关键洞察)/;
+    if (!primary || !trend) {
+      return { ok: false, reason: '主要洞察或变化趋势缺失' };
+    }
+    if (genericPattern.test(primary) || genericPattern.test(trend)) {
+      return { ok: false, reason: '命中规则兜底文案' };
+    }
+
+    const ratioWords = /(偏多|多数|占比更高|占比偏高|主导|占优|偏向)/;
+    const moodWords = /(开心|不开心|积极|消极|中性|低落|焦虑|难过|平静|生气|压力)/;
+    const moodDominant = new RegExp(`(${moodWords.source})[^。]{0,8}为主|为主[^。]{0,8}(${moodWords.source})`);
+    const hasRatio = ratioWords.test(primary) || moodDominant.test(primary);
+    const hasMoodWord = moodWords.test(primary);
+    if (!hasRatio || !hasMoodWord) {
+      return { ok: false, reason: '主要洞察缺少情绪占比或主导倾向' };
+    }
+
+    const timeAnchors = /(相比更早阶段|相比你过往的记录习惯|相比同一主题的历史表现|最近一段|近期|最近|近一段|更早阶段)/;
+    const directionWords = /(增加|减少|上升|下降|趋稳|波动|波动加大|变强|变弱|更集中|更分散)/;
+    if (!timeAnchors.test(trend) || !directionWords.test(trend)) {
+      return { ok: false, reason: '变化趋势缺少时间锚点或方向词' };
+    }
+
+    return { ok: true, reason: '' };
+  }
+
   /**
    * 格式化洞察数据
    */
@@ -707,6 +907,7 @@ ${text}
     const keyFinding = insights.keyFindings || insights.finding || insights.summary || '';
     const trendText = insights.trends || insights.trend || insights.points || '';
     const recommendation = insights.recommendations || insights.suggestion || insights.direction || '';
+    const allowFallback = String(notebookType || '').trim() !== 'mood';
 
     const truncateTo = (text, limit) => {
       const s = String(text || '').trim();
@@ -819,11 +1020,12 @@ ${text}
     
     // 如果有关键发现或总结，添加"主要洞察"
     if (keyFinding && keyFinding.trim()) {
+      const resolvedKeyFinding = allowFallback ? ensureJudgement(keyFinding) : String(keyFinding || '').trim();
       result.push({
         id: 'insight_1',
         title: '主要洞察',
-        summary: truncateTo(ensureJudgement(keyFinding), 80),
-        description: truncateTo(ensureJudgement(keyFinding), 80),
+        summary: truncateTo(resolvedKeyFinding, 80),
+        description: truncateTo(resolvedKeyFinding, 80),
         type: 'positive',
         confidence: 0.85,
         actionable: false,
@@ -833,11 +1035,12 @@ ${text}
     
     // 如果有趋势或要点，添加"变化趋势"
     if (trendText && trendText.trim()) {
+      const resolvedTrend = allowFallback ? ensureCompareAnchor(trendText) : String(trendText || '').trim();
       result.push({
         id: 'insight_2',
         title: '变化趋势',
-        summary: truncateTo(ensureCompareAnchor(trendText), 80),
-        description: truncateTo(ensureCompareAnchor(trendText), 80),
+        summary: truncateTo(resolvedTrend, 80),
+        description: truncateTo(resolvedTrend, 80),
         type: 'trend',
         confidence: 0.78,
         actionable: false,

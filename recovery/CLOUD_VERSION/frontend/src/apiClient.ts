@@ -5,27 +5,47 @@ import type { AnalysisV3Request, AnalysisV3Response } from './types/Analysis';
 // API客户端配置
 // 兼容多环境：
 const resolveBaseURL = () => {
-  // 优先使用环境变量配置（Vite 使用 import.meta.env）
-  const viteApiUrl = (import.meta.env as any).VITE_API_URL;
-  if (viteApiUrl) {
-    console.log('🌐 使用环境变量配置的API地址:', viteApiUrl);
-    return viteApiUrl;
-  }
-  
-  // 在浏览器环境中，使用相对路径让 Vite 代理处理
-  // Vite 配置了代理：/api -> http://localhost:3001
-  if (typeof window !== 'undefined') {
-    console.log('🌐 使用相对路径（通过 Vite 代理）');
+  const viteApiUrl = (import.meta.env as any).VITE_API_URL as string | undefined;
+  const isBrowser = typeof window !== 'undefined';
+
+  // 浏览器：优先使用同源 /api（本地靠 Vite proxy，线上靠 Vercel rewrites）
+  // 这样可以让 Cookie（credentials: include）在 Vercel + Fly 场景下正常工作。
+  if (isBrowser) {
+    const hostname = window.location.hostname;
+    const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+
+    // 线上环境强制同源（避免配置了跨域 baseURL 导致登录 Cookie 不生效）
+    if (!isLocalhost) return '';
+
+    // 本地开发允许显式指定后端地址（可选），否则走 Vite /api 代理
+    if (viteApiUrl) {
+      console.log('🌐 使用环境变量配置的API地址:', viteApiUrl);
+      return viteApiUrl;
+    }
     return '';
   }
-  
-  // 服务器端渲染或非浏览器环境
-  console.log('🌐 服务器端：使用默认后端地址 http://localhost:3001');
+
+  // 非浏览器环境（脚本/SSR 等）：允许使用环境变量，否则回退到本地默认
+  if (viteApiUrl) return viteApiUrl;
   return 'http://localhost:3001';
 };
 
 // 运行时解析
 const API_BASE_URL = resolveBaseURL();
+
+const getBackendDisplayUrl = () => {
+  if (API_BASE_URL) return API_BASE_URL;
+  if (typeof window !== 'undefined') return `${window.location.origin}/api (via proxy)`;
+  return 'http://localhost:3001';
+};
+
+const isNetworkError = (error: any) => {
+  if (!error) return false;
+  if (error instanceof TypeError) return true;
+  if (error?.name === 'TypeError' && String(error?.message || '').toLowerCase().includes('fetch')) return true;
+  if (String(error?.message || '') === 'Failed to fetch') return true;
+  return false;
+};
 
 // 导入NotebookType类型
 export type NotebookType = 'mood' | 'study' | 'work' | 'life';
@@ -213,10 +233,14 @@ const getNotebooks = async (): Promise<Notebook[]> => {
     console.error('❌ Error fetching notebooks:', error);
     
     // 处理网络错误
-    if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-      const requestUrl = `${API_BASE_URL || window.location.origin}/api/notebooks`;
-      const backendUrl = API_BASE_URL || 'http://localhost:3001';
-      throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
+    if (isNetworkError(error)) {
+      const backendUrl = getBackendDisplayUrl();
+      throw new Error(
+        `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+          `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+          `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+          `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+      );
     }
     
     throw error;
@@ -273,10 +297,14 @@ const getNotes = async (notebookId: string): Promise<{ notebook: Notebook; notes
     console.error('❌ Error fetching notes:', error);
     
     // 处理网络错误
-    if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-      const requestUrl = `${API_BASE_URL || window.location.origin}/api/notes`;
-      const backendUrl = API_BASE_URL || 'http://localhost:3001';
-      throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
+    if (isNetworkError(error)) {
+      const backendUrl = getBackendDisplayUrl();
+      throw new Error(
+        `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+          `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+          `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+          `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+      );
     }
     
     throw error;
@@ -287,8 +315,9 @@ const getNotes = async (notebookId: string): Promise<{ notebook: Notebook; notes
 const healthCheck = async (): Promise<boolean> => {
   try {
     const response = await fetch(`${API_BASE_URL}/api/health`, { credentials: 'include' });
-    const data = await response.json();
-    return data.success === true;
+    if (!response.ok) return false;
+    const data = await response.json().catch(() => null);
+    return data?.success === true || data?.status === 'ok';
   } catch (error) {
     console.error('Health check failed:', error);
     return false;
@@ -427,9 +456,14 @@ class ApiClient {
       }
       
       // 处理网络错误
-      if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const backendUrl = this.baseURL || 'http://localhost:3001';
-        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
+      if (isNetworkError(error)) {
+        const backendUrl = this.baseURL || getBackendDisplayUrl();
+        throw new Error(
+          `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+            `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+            `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+            `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+        );
       }
       
       // 重新抛出其他错误
@@ -470,9 +504,14 @@ class ApiClient {
       console.error('❌ POST请求失败:', error);
       
       // 处理网络错误
-      if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const backendUrl = this.baseURL || 'http://localhost:3001';
-        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
+      if (isNetworkError(error)) {
+        const backendUrl = this.baseURL || getBackendDisplayUrl();
+        throw new Error(
+          `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+            `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+            `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+            `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+        );
       }
       
       // 重新抛出其他错误
@@ -514,8 +553,14 @@ class ApiClient {
       console.error('❌ PUT请求失败:', error);
       
       // 处理网络错误
-      if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        throw new Error(`无法连接到服务器 (${this.baseURL})。请检查后端服务是否运行。`);
+      if (isNetworkError(error)) {
+        const backendUrl = this.baseURL || getBackendDisplayUrl();
+        throw new Error(
+          `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+            `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+            `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+            `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+        );
       }
       
       // 重新抛出其他错误
@@ -557,9 +602,14 @@ class ApiClient {
       console.error('❌ DELETE请求失败:', error);
       
       // 处理网络错误
-      if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        const backendUrl = this.baseURL || 'http://localhost:3001';
-        throw new Error(`无法连接到后端服务器 (${backendUrl})。请检查：\n1. 后端服务是否在端口 3001 运行\n2. 检查浏览器控制台的网络请求错误详情`);
+      if (isNetworkError(error)) {
+        const backendUrl = this.baseURL || getBackendDisplayUrl();
+        throw new Error(
+          `无法连接到后端服务（${backendUrl}）。请检查：\n` +
+            `1. 浏览器 Network 里 /api 请求是否有返回\n` +
+            `2. Vercel 是否配置了 /api 重写到 Fly（vercel.json rewrites）\n` +
+            `3. Fly 后端是否健康：https://echonotes0112.fly.dev/api/health`
+        );
       }
       
       // 重新抛出其他错误

@@ -6,9 +6,16 @@
 import express from 'express';
 import axios from 'axios';
 import https from 'https';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import multer from 'multer';
 import { normalizeParseHistoryStatus, getParseHistoryStatusVariants } from '../lib/utils.js';
 import { sanitizeString } from '../lib/string-utils.js';
 import AIService from '../services/ai-service.js';
+import { fetchLinkMetadata } from '../services/link-metadata.js';
+import { transcribeDashscopeFromUrl } from '../services/dashscope-asr.js';
 
 // Coze 在部分网络环境下可能对 TLS/代理/长连接较敏感：
 // - 显式指定 SNI（servername）
@@ -1352,6 +1359,142 @@ ${content}
 
 const router = express.Router();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads');
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+} catch (e) {
+  // ignore
+}
+
+const ALLOWED_UPLOAD_EXT = new Set([
+  '.mp3',
+  '.mp4',
+  '.wav',
+  '.m4a',
+  '.aac',
+  '.ogg',
+  '.webm'
+]);
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+      const ext = String(path.extname(file?.originalname || '') || '').toLowerCase();
+      const safeExt = ALLOWED_UPLOAD_EXT.has(ext) ? ext : '.bin';
+      const name = `${Date.now()}_${crypto.randomBytes(12).toString('hex')}${safeExt}`;
+      cb(null, name);
+    }
+  }),
+  limits: {
+    fileSize: Number(process.env.UPLOAD_MAX_BYTES || 200 * 1024 * 1024)
+  }
+});
+
+const isShortVideoShareUrl = (url) => {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.includes('v.douyin.com') || host.includes('xhslink.com');
+  } catch {
+    return false;
+  }
+};
+
+const toCanonicalUrl = (url) => {
+  try {
+    const u = new URL(String(url || '').trim());
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return String(url || '').trim();
+  }
+};
+
+const buildShortVideoParsedFields = async (articleUrl) => {
+  let host = '';
+  try {
+    host = new URL(articleUrl).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  if (!host) return null;
+
+  const isDouyin = host.includes('v.douyin.com');
+  const isXhs = host.includes('xhslink.com');
+  if (!isDouyin && !isXhs) return null;
+
+  // 只做“元信息解析 + 分享链接落库”，不做无水印直链提取/下载
+  const ua = isXhs
+    ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    : 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+
+  // 先用短链解析出 finalUrl，再对 finalUrl 做二次抓取（避免落地页的通用文案污染解析结果）
+  const shareMeta = await fetchLinkMetadata(articleUrl, { headers: { 'User-Agent': ua } });
+  const resolvedUrlRaw = shareMeta.finalUrl || articleUrl;
+  const resolvedUrlCanonical = toCanonicalUrl(resolvedUrlRaw);
+
+  let meta = shareMeta;
+  // 二次抓取时使用“带参数的最终 URL”（部分平台需要 token 参数才能访问），但落库/展示用 canonical URL（去 query）
+  if (resolvedUrlRaw && resolvedUrlRaw !== articleUrl) {
+    try {
+      meta = await fetchLinkMetadata(resolvedUrlRaw, { headers: { 'User-Agent': ua } });
+      meta = {
+        ...meta,
+        inputUrl: articleUrl,
+        finalUrl: resolvedUrlCanonical,
+        resolvedUrlRaw
+      };
+    } catch {
+      meta = {
+        ...shareMeta,
+        finalUrl: resolvedUrlCanonical,
+        resolvedUrlRaw
+      };
+    }
+  } else {
+    meta = {
+      ...shareMeta,
+      finalUrl: resolvedUrlCanonical || articleUrl
+    };
+  }
+
+  const sourcePlatform = isDouyin ? '抖音' : '小红书';
+  const noteType = isDouyin ? '短视频笔记' : '生活笔记';
+  const title = sanitizeString(meta.title || '') || '';
+  const rawDesc = sanitizeString(meta.description || '') || '';
+  const desc = rawDesc
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !/^跳转后链接[:：]/.test(line))
+    .join('\n')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // content 只保留“可读文本”，不要拼接带参数的 URL（避免影响关键词/摘要）
+  const contentLines = [];
+  if (desc) contentLines.push(desc);
+  if (!desc && title) contentLines.push(title);
+
+  const imgUrls = [];
+  if (meta.imageUrl) imgUrls.push(meta.imageUrl);
+
+  return {
+    parsedFields: {
+      title,
+      content: contentLines.join('\n\n'),
+      summary: '',
+      link: meta.finalUrl || articleUrl,
+      source_url: articleUrl,
+      img_urls: imgUrls,
+      source_platform: sourcePlatform,
+      note_type: noteType
+    },
+    meta
+  };
+};
+
 /**
  * 初始化解析路由
  * @param {object} db - 数据库实例
@@ -1359,6 +1502,72 @@ const router = express.Router();
  */
 export function initParseRoutes(db) {
   const aiService = new AIService();
+
+  // 转写：对“你已获授权的媒体 URL”做转写（DashScope 文件转写 API）
+  router.post('/api/transcribe-url', async (req, res) => {
+    try {
+      const { mediaUrl, model, languageHints, maxWaitMs } = req.body || {};
+      if (!mediaUrl || typeof mediaUrl !== 'string') {
+        return res.status(400).json({ success: false, error: '请提供 mediaUrl' });
+      }
+      const apiKey = (process.env.DASHSCOPE_API_KEY || '').trim();
+      if (!apiKey) {
+        return res.status(400).json({ success: false, error: '未配置 DASHSCOPE_API_KEY' });
+      }
+      const text = await transcribeDashscopeFromUrl({
+        apiKey,
+        mediaUrl: mediaUrl.trim(),
+        model: typeof model === 'string' && model.trim() ? model.trim() : 'paraformer-v2',
+        languageHints: Array.isArray(languageHints) ? languageHints : ['zh', 'en'],
+        maxWaitMs: Number(maxWaitMs || 180000)
+      });
+      res.json({ success: true, data: { transcript: text } });
+    } catch (error) {
+      console.error('❌ 转写 URL 失败:', error);
+      res.status(500).json({ success: false, error: error.message || '转写失败' });
+    }
+  });
+
+  // 转写：上传文件 → 生成可访问 URL → DashScope 拉取转写
+  // 注意：需要配置 PUBLIC_BASE_URL（能被 DashScope 服务端访问到），否则无法转写。
+  router.post('/api/transcribe-upload', upload.single('file'), async (req, res) => {
+    try {
+      const apiKey = (process.env.DASHSCOPE_API_KEY || '').trim();
+      if (!apiKey) {
+        return res.status(400).json({ success: false, error: '未配置 DASHSCOPE_API_KEY' });
+      }
+      const publicBase = (process.env.PUBLIC_BASE_URL || '').trim();
+      if (!publicBase) {
+        return res.status(400).json({
+          success: false,
+          error: '未配置 PUBLIC_BASE_URL（需要可公网访问的地址，DashScope 才能拉取你上传的文件）'
+        });
+      }
+      const file = req.file;
+      if (!file?.filename) {
+        return res.status(400).json({ success: false, error: '未收到上传文件（字段名应为 file）' });
+      }
+      const fileUrl = new URL(`/uploads/${encodeURIComponent(file.filename)}`, publicBase).toString();
+      const model = typeof req.body?.model === 'string' && req.body.model.trim() ? req.body.model.trim() : 'paraformer-v2';
+
+      const text = await transcribeDashscopeFromUrl({
+        apiKey,
+        mediaUrl: fileUrl,
+        model
+      });
+
+      res.json({
+        success: true,
+        data: {
+          transcript: text,
+          fileUrl
+        }
+      });
+    } catch (error) {
+      console.error('❌ 转写上传文件失败:', error);
+      res.status(500).json({ success: false, error: error.message || '转写失败' });
+    }
+  });
 
   // 链接查重：判断文章是否已解析过
   router.post('/api/coze/check-article-exists', async (req, res) => {
@@ -1396,6 +1605,86 @@ export function initParseRoutes(db) {
         });
       }
       const cleanedArticleUrl = articleUrl.trim();
+
+      // 短视频分享链接：优先走“元信息解析 + 落库”分支，不走 Coze
+      if (isShortVideoShareUrl(cleanedArticleUrl)) {
+        const short = await buildShortVideoParsedFields(cleanedArticleUrl);
+        if (!short) {
+          return res.status(400).json({ success: false, error: '短视频链接解析失败' });
+        }
+
+        const now = new Date().toISOString();
+        const historyId = `parse_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const parsedFields = normalizeParsedFields({
+          extractedFields: short.parsedFields,
+          fallbackContent: short.parsedFields.content || '',
+          fallbackSummary: '',
+          articleUrl: cleanedArticleUrl,
+          createdAt: now
+        });
+        const tagsValue = parsedFields.keywords?.length ? JSON.stringify(parsedFields.keywords) : null;
+
+        // 推荐/兜底笔记本
+        let suggestedNotebookId = null;
+        let suggestedNotebookName = null;
+        try {
+          const selection = await selectNotebookWithAI({ db, aiService, parsedFields });
+          suggestedNotebookId = selection?.notebookId || null;
+          suggestedNotebookName = selection?.notebookName || null;
+        } catch (e) {
+          try {
+            const fallbackNotebook = await ensureNotebookForClassification(
+              db,
+              parsedFields.note_type || parsedFields.noteType || parsedFields.source_platform || '通用笔记'
+            );
+            suggestedNotebookId = fallbackNotebook?.notebook_id || null;
+            suggestedNotebookName = fallbackNotebook?.name || null;
+          } catch {
+            // ignore
+          }
+        }
+
+        await db.run(
+          `INSERT INTO article_parse_history 
+           (id, source_url, parsed_content, parsed_title, parsed_summary, parsed_author, parsed_published_at, parsed_platform,
+            parsed_fields, tags, suggested_notebook_id, suggested_notebook_name,
+            status, parse_query, coze_response_data, created_at, parsed_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            historyId,
+            cleanedArticleUrl,
+            parsedFields.content || '',
+            parsedFields.title || null,
+            parsedFields.summary || null,
+            parsedFields.author || null,
+            parsedFields.published_at || null,
+            parsedFields.source_platform || null,
+            JSON.stringify(parsedFields),
+            tagsValue,
+            suggestedNotebookId,
+            suggestedNotebookName,
+            'completed',
+            query || null,
+            JSON.stringify({ mode: 'shortvideo_meta', meta: short.meta }),
+            now,
+            now,
+            now
+          ]
+        );
+
+        return res.json({
+          success: true,
+          data: {
+            content: parsedFields.content || '',
+            suggestedNotebookName,
+            suggestedNotebookId,
+            parsedSummary: parsedFields.summary || null,
+            parsedFields,
+            sourceUrl: cleanedArticleUrl,
+            historyId
+          }
+        });
+      }
 
       // Coze配置（仅使用 Workflow，不走 bot/chat）
       const COZE_WEBHOOK_URL = ''; // 禁用 webhook
@@ -2706,6 +2995,129 @@ export function initParseRoutes(db) {
         });
       }
       const cleanedArticleUrl = articleUrl.trim();
+
+      // 短视频分享链接：优先走“元信息解析 → 直接进入分配与建笔记”分支，不走 Coze
+      if (isShortVideoShareUrl(cleanedArticleUrl)) {
+        const short = await buildShortVideoParsedFields(cleanedArticleUrl);
+        if (!short) {
+          return res.status(400).json({ success: false, error: '短视频链接解析失败' });
+        }
+
+        const now = new Date().toISOString();
+        const historyId = `parse_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const parsedFields = normalizeParsedFields({
+          extractedFields: short.parsedFields,
+          fallbackContent: short.parsedFields.content || '',
+          fallbackSummary: '',
+          articleUrl: cleanedArticleUrl,
+          createdAt: now
+        });
+        const tagsValue = parsedFields.keywords?.length ? JSON.stringify(parsedFields.keywords) : null;
+
+        let suggestedNotebookId = null;
+        let suggestedNotebookName = null;
+        let createdNotebookId = null;
+        try {
+          const selection = await selectNotebookWithAI({ db, aiService, parsedFields });
+          suggestedNotebookId = selection?.notebookId || null;
+          suggestedNotebookName = selection?.notebookName || null;
+          if (selection?.created) createdNotebookId = suggestedNotebookId;
+        } catch (e) {
+          const fallbackNotebook = await ensureNotebookForClassification(
+            db,
+            parsedFields.note_type || parsedFields.noteType || parsedFields.source_platform || '通用笔记'
+          );
+          suggestedNotebookId = fallbackNotebook?.notebook_id || null;
+          suggestedNotebookName = fallbackNotebook?.name || null;
+          if (fallbackNotebook?.created) createdNotebookId = suggestedNotebookId;
+        }
+
+        // 先落库一条 completed 记录
+        await db.run(
+          `INSERT INTO article_parse_history 
+           (id, source_url, parsed_content, parsed_title, parsed_summary, parsed_author, parsed_published_at, parsed_platform,
+            parsed_fields, tags, suggested_notebook_id, suggested_notebook_name,
+            status, parse_query, coze_response_data, created_at, parsed_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            historyId,
+            cleanedArticleUrl,
+            parsedFields.content || '',
+            parsedFields.title || null,
+            parsedFields.summary || null,
+            parsedFields.author || null,
+            parsedFields.published_at || null,
+            parsedFields.source_platform || null,
+            JSON.stringify(parsedFields),
+            tagsValue,
+            suggestedNotebookId,
+            suggestedNotebookName,
+            'completed',
+            query || null,
+            JSON.stringify({ mode: 'shortvideo_meta', meta: short.meta }),
+            now,
+            now,
+            now
+          ]
+        );
+
+        // 写入笔记
+        let assignmentResult = null;
+        if (suggestedNotebookId) {
+          try {
+            assignmentResult = await createNoteFromParsedResult({
+              db,
+              aiService,
+              notebookId: suggestedNotebookId,
+              parsedFields,
+              historyId,
+              sourceUrl: cleanedArticleUrl,
+              sourceType: 'link'
+            });
+            if (assignmentResult?.success) {
+              const noteIdsPayload = JSON.stringify([assignmentResult.noteId]);
+              await db.run(
+                'UPDATE article_parse_history SET note_ids = ?, assigned_notebook_id = ?, assigned_notebook_name = ?, status = ?, updated_at = ? WHERE id = ?',
+                [
+                  noteIdsPayload,
+                  assignmentResult.notebookId,
+                  assignmentResult.notebookName || suggestedNotebookName || null,
+                  'assigned',
+                  new Date().toISOString(),
+                  historyId
+                ]
+              );
+            }
+          } catch (assignError) {
+            console.error('❌ 短视频链接写入笔记失败:', assignError);
+            assignmentResult = { success: false, error: assignError?.message || '写入笔记失败' };
+          }
+        }
+
+        const assigned = Boolean(assignmentResult?.success);
+        const resolvedNotebookName = assignmentResult?.notebookName || suggestedNotebookName || null;
+        const responseMessage = assigned
+          ? `解析成功并已自动分配到笔记本：${resolvedNotebookName || '未知'}`
+          : suggestedNotebookId
+            ? `解析成功，但写入笔记失败：${assignmentResult?.error || '未知错误'}`
+            : '解析成功，但未找到推荐的笔记本';
+
+        return res.json({
+          success: true,
+          data: {
+            historyId,
+            assigned,
+            noteId: assignmentResult?.noteId || null,
+            suggestedNotebookId: assignmentResult?.notebookId || suggestedNotebookId,
+            suggestedNotebookName: resolvedNotebookName,
+            createdNotebookId,
+            message: responseMessage,
+            parsedSummary: parsedFields.summary || null,
+            parsedFields,
+            sourceUrl: cleanedArticleUrl
+          }
+        });
+      }
 
       // 复用解析文章的逻辑（仅 Workflow，不走 bot/chat）
       const COZE_WEBHOOK_URL = '';

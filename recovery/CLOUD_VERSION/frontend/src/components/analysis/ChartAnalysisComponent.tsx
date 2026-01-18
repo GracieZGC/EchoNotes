@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  LineChart,
   Line,
   Area,
   AreaChart,
@@ -11,12 +10,35 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
   BarChart,
   Bar
 } from 'recharts';
 import apiClient from '../../apiClient';
+
+const CHART_FONT_FAMILY = '"Microsoft YaHei", "PingFang SC", "Helvetica Neue", Arial, sans-serif';
+const CHART_TICK_COLOR = '#3D3A3A';
+const CHART_AXIS_LINE = '#CCCCCC';
+const CHART_GRID_COLOR = '#EAE9E9';
+const CHART_BASE_COLOR = '#06c3a8';
+const makeMonoPalette = (count: number) => {
+  const total = Math.max(count, 1);
+  return Array.from({ length: total }, (_, index) => {
+    const ratio = total === 1 ? 0 : index / (total - 1);
+    const alpha = 0.9 - ratio * 0.45;
+    return `rgba(6, 195, 168, ${Math.max(0.4, alpha).toFixed(2)})`;
+  });
+};
+const CHART_MONO_PALETTE = makeMonoPalette(9);
+const CHART_LINE_PALETTE = CHART_MONO_PALETTE;
+const CHART_BAR_PALETTE = CHART_MONO_PALETTE;
+const CHART_PIE_PALETTE = CHART_MONO_PALETTE;
+
+const getChartPalette = (type: string) => {
+  if (type === 'pie') return CHART_PIE_PALETTE;
+  if (type === 'bar') return CHART_BAR_PALETTE;
+  return CHART_LINE_PALETTE;
+};
 
 interface ChartAnalysisComponentProps {
   analysisData?: {
@@ -58,6 +80,25 @@ function ChartAnalysisComponent({
   const [notesData, setNotesData] = useState<any[]>([]);
   const [loadingNotes, setLoadingNotes] = useState(false);
   const [chartTypeOverrides, setChartTypeOverrides] = useState<Record<string, string>>({});
+  const axisTickStyle = useMemo(
+    () => ({
+      fontSize: 12,
+      fill: CHART_TICK_COLOR,
+      fontFamily: CHART_FONT_FAMILY
+    }),
+    []
+  );
+  const tooltipBaseStyle = useMemo(
+    () => ({
+      backgroundColor: '#fff',
+      border: `1px solid ${CHART_GRID_COLOR}`,
+      borderRadius: '6px',
+      padding: '8px 10px',
+      boxShadow: '0 6px 14px rgba(0,0,0,0.08)',
+      fontFamily: CHART_FONT_FAMILY
+    }),
+    []
+  );
 
   const formatDateLabel = (value: any) => {
     if (!value) return '';
@@ -456,6 +497,9 @@ function ChartAnalysisComponent({
           return null;
         })();
 
+        const chartPalette = getChartPalette(chartType);
+        const primaryChartColor = CHART_BASE_COLOR;
+
         // 处理多条数据线（如果有 point 字段，按 point 分组）
         const hasMultipleSeries = chartData.some((item: any) => item.point || item.pointField);
         let chartSeries: any[] = [];
@@ -503,14 +547,11 @@ function ChartAnalysisComponent({
           return (
             <div
               style={{
-                backgroundColor: '#fff',
-                border: '1px solid #e5e7eb',
-                borderRadius: '8px',
-                padding: '10px',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
+                ...tooltipBaseStyle,
+                color: CHART_TICK_COLOR
               }}
             >
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>{labelText}</div>
+              <div style={{ fontWeight: 600, marginBottom: 6, color: CHART_TICK_COLOR }}>{labelText}</div>
               {uniqueByKey.map((item: any) => (
                 <div key={item.dataKey} style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
                   <span
@@ -523,13 +564,35 @@ function ChartAnalysisComponent({
                       marginRight: 6
                     }}
                   />
-                  <span style={{ color: '#6b7280', fontSize: 12, marginRight: 6 }}>{displayYAxisName}</span>
-                  <span style={{ color: '#111827', fontWeight: 600 }}>
+                  <span style={{ color: CHART_TICK_COLOR, fontSize: 12, marginRight: 6 }}>{displayYAxisName}</span>
+                  <span style={{ color: '#1f2933', fontWeight: 600 }}>
                     {typeof item.value === 'number' ? item.value.toFixed(2) : item.payload?.__rawY || item.value}
                   </span>
                 </div>
               ))}
             </div>
+          );
+        };
+
+        const renderPieLabel = (props: any) => {
+          const { cx, cy, midAngle, innerRadius, outerRadius, percent } = props;
+          const normalized = typeof percent === 'number' ? percent : 0;
+          const radius = innerRadius + (outerRadius - innerRadius) * 1.25;
+          const angle = (-midAngle * Math.PI) / 180;
+          const x = cx + radius * Math.cos(angle);
+          const y = cy + radius * Math.sin(angle);
+          return (
+            <text
+              x={x}
+              y={y}
+              fill={CHART_TICK_COLOR}
+              fontSize={12}
+              fontFamily={CHART_FONT_FAMILY}
+              textAnchor={x > cx ? 'start' : 'end'}
+              dominantBaseline="central"
+            >
+              {`${(normalized * 100).toFixed(0)}%`}
+            </text>
           );
         };
 
@@ -592,31 +655,31 @@ function ChartAnalysisComponent({
                           margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
                         >
                           <defs>
-                            <linearGradient id="colorGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#FF6347" stopOpacity={0.3}/>
-                              <stop offset="95%" stopColor="#FF6347" stopOpacity={0.05}/>
+                            <linearGradient id={`chart-${chartId}-gradient-main`} x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor={primaryChartColor} stopOpacity={0.26}/>
+                              <stop offset="95%" stopColor={primaryChartColor} stopOpacity={0.04}/>
                             </linearGradient>
                             {chartSeries.length > 0 && chartSeries.map((_, idx) => {
-                              const colors = ['#FF6347', '#ffc0cb', '#9370db'];
+                              const color = chartPalette[idx % chartPalette.length];
                               return (
-                                <linearGradient key={idx} id={`colorGradient${idx}`} x1="0" y1="0" x2="0" y2="1">
-                                  <stop offset="5%" stopColor={colors[idx % colors.length]} stopOpacity={0.3}/>
-                                  <stop offset="95%" stopColor={colors[idx % colors.length]} stopOpacity={0.05}/>
+                                <linearGradient key={idx} id={`chart-${chartId}-gradient-${idx}`} x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor={color} stopOpacity={0.26}/>
+                                  <stop offset="95%" stopColor={color} stopOpacity={0.04}/>
                                 </linearGradient>
                               );
                             })}
                           </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                          <CartesianGrid strokeDasharray="0" stroke={CHART_GRID_COLOR} vertical={false} />
                           <XAxis 
                             dataKey="xNumeric" 
                             type="number"
                             domain={['dataMin', 'dataMax']}
                             allowDataOverflow
                             ticks={xTicks}
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
                             tickLine={false}
-                            axisLine={false}
+                            axisLine={{ stroke: CHART_AXIS_LINE }}
                             tickFormatter={(value) => {
                               if (xLabelMap.has(value)) return xLabelMap.get(value)!;
                               // 补白点不显示标签
@@ -624,9 +687,9 @@ function ChartAnalysisComponent({
                             }}
                           />
                           <YAxis 
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
-                            tickLine={true}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
+                            tickLine={false}
                             axisLine={false}
                             domain={yDomain || [0, 'auto']}
                             ticks={yTicks}
@@ -641,23 +704,23 @@ function ChartAnalysisComponent({
                             // 多条线
                             <>
                               {chartSeries.map((series, idx) => {
-                                const colors = ['#FF6347', '#ffc0cb', '#9370db']; // 红、粉、紫
+                                const color = chartPalette[idx % chartPalette.length];
                                 return (
                                   <React.Fragment key={series.name}>
                                     <Area
                                       type="monotone"
                                       dataKey={`y${idx}`}
-                                      stroke={colors[idx % colors.length]}
+                                      stroke={color}
                                       strokeWidth={2}
-                                      fill={`url(#colorGradient${idx})`}
+                                      fill={`url(#chart-${chartId}-gradient-${idx})`}
                                     />
                                     <Line 
                                       type="monotone" 
                                       dataKey={`y${idx}`}
-                                      stroke={colors[idx % colors.length]}
+                                      stroke={color}
                                       strokeWidth={2}
-                                      dot={{ r: 4, fill: colors[idx % colors.length] }}
-                                      activeDot={{ r: 6, fill: colors[idx % colors.length] }}
+                                      dot={false}
+                                      activeDot={{ r: 3, fill: color }}
                                       name="Content"
                                     />
                                   </React.Fragment>
@@ -670,37 +733,53 @@ function ChartAnalysisComponent({
                               <Area
                                 type="monotone"
                                 dataKey="yNumeric"
-                                stroke="#FF6347"
+                                stroke={primaryChartColor}
                                 strokeWidth={2}
-                                fill="url(#colorGradient)"
+                                fill={`url(#chart-${chartId}-gradient-main)`}
                               />
                               <Line 
                                 type="monotone" 
                                 dataKey="yNumeric" 
-                                stroke="#FF6347" 
+                                stroke={primaryChartColor}
                                 strokeWidth={2}
-                                dot={{ r: 4, fill: '#FF6347' }}
-                                activeDot={{ r: 6, fill: '#FF6347' }}
+                                dot={false}
+                                activeDot={{ r: 3, fill: primaryChartColor }}
                               />
                             </>
                           )}
                         </AreaChart>
                       </ResponsiveContainer>
                     ) : chartType === 'bar' ? (
+                      (() => {
+                        const barValues = chartData
+                          .filter((item: any) => !item?.__syntheticPoint)
+                          .map((item: any) => item?.yNumeric)
+                          .filter((value: any) => Number.isFinite(value));
+                        const barMax = barValues.length ? Math.max(...barValues) : 0;
+                        const barYMax = Math.max(1, Math.ceil(barMax * 1.15));
+                        const computedBarTicks = Array.from({ length: barYMax + 1 }, (_, idx) => idx);
+                        const barTicks = Array.isArray(yTicks) && yTicks.length > 0 ? yTicks : computedBarTicks;
+                        const barGridTicks = barTicks;
+                        return (
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart
                           data={chartData.filter((item: any) => !item?.__syntheticPoint)}
                           margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
                         >
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                          <CartesianGrid
+                            strokeDasharray="0"
+                            stroke={CHART_GRID_COLOR}
+                            vertical={false}
+                            horizontalValues={barGridTicks}
+                          />
                           <XAxis
                             dataKey="xNumeric"
                             type="number"
                             domain={['dataMin', 'dataMax']}
                             allowDataOverflow
                             ticks={xTicks}
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
                             tickLine={false}
                             axisLine={false}
                             tickFormatter={(value) => {
@@ -709,12 +788,12 @@ function ChartAnalysisComponent({
                             }}
                           />
                           <YAxis
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
-                            tickLine={true}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
+                            tickLine={false}
                             axisLine={false}
                             domain={yDomain || [0, 'auto']}
-                            ticks={yTicks}
+                            ticks={barTicks}
                             allowDecimals={yDomain ? false : true}
                             tickCount={yDomain ? undefined : 5}
                             tickFormatter={(value) => categoryLabelMap[value] || value}
@@ -722,12 +801,15 @@ function ChartAnalysisComponent({
                           <Tooltip content={renderLineTooltip} />
                           <Bar
                             dataKey="yNumeric"
-                            fill="#FF6347"
-                            radius={[4, 4, 0, 0]}
+                            fill={primaryChartColor}
+                            radius={[0, 0, 0, 0]}
+                            barSize={32}
                             maxBarSize={40}
                           />
                         </BarChart>
                       </ResponsiveContainer>
+                        );
+                      })()
                     ) : chartType === 'area' ? (
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart
@@ -735,31 +817,31 @@ function ChartAnalysisComponent({
                           margin={{ top: 30, right: 30, left: 10, bottom: 10 }}
                         >
                           <defs>
-                            <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#FF6347" stopOpacity={0.35} />
-                              <stop offset="95%" stopColor="#FF6347" stopOpacity={0.05} />
+                            <linearGradient id={`chart-${chartId}-area-gradient`} x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor={primaryChartColor} stopOpacity={0.26} />
+                              <stop offset="95%" stopColor={primaryChartColor} stopOpacity={0.04} />
                             </linearGradient>
                           </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                          <CartesianGrid strokeDasharray="0" stroke={CHART_GRID_COLOR} vertical={false} />
                           <XAxis
                             dataKey="xNumeric"
                             type="number"
                             domain={['dataMin', 'dataMax']}
                             allowDataOverflow
                             ticks={xTicks}
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
                             tickLine={false}
-                            axisLine={false}
+                            axisLine={{ stroke: CHART_AXIS_LINE }}
                             tickFormatter={(value) => {
                               if (xLabelMap.has(value)) return xLabelMap.get(value)!;
                               return formatDateLabel(value) || '';
                             }}
                           />
                           <YAxis
-                            stroke="#000"
-                            tick={{ fontSize: 12, fill: '#000' }}
-                            tickLine={true}
+                            stroke={CHART_AXIS_LINE}
+                            tick={axisTickStyle}
+                            tickLine={false}
                             axisLine={false}
                             domain={yDomain || [0, 'auto']}
                             ticks={yTicks}
@@ -771,9 +853,9 @@ function ChartAnalysisComponent({
                           <Area
                             type="monotone"
                             dataKey="yNumeric"
-                            stroke="#FF6347"
+                            stroke={primaryChartColor}
                             strokeWidth={2}
-                            fill="url(#areaGradient)"
+                            fill={`url(#chart-${chartId}-area-gradient)`}
                           />
                         </AreaChart>
                       </ResponsiveContainer>
@@ -785,34 +867,26 @@ function ChartAnalysisComponent({
                               name: item.title || `Item ${index + 1}`,
                               value: typeof item.y === 'number' ? item.y : Number(item.y) || 0
                             }))}
-                            cx="40%"
+                            cx="50%"
                             cy="50%"
-                            labelLine={false}
-                            label={({ percent }) => {
-                              const normalized = typeof percent === 'number' ? percent : 0;
-                              return `${(normalized * 100).toFixed(0)}%`;
-                            }}
+                            innerRadius={60}
                             outerRadius={80}
-                            fill="#8884d8"
+                            paddingAngle={2}
+                            labelLine={false}
+                            label={renderPieLabel}
+                            fill={primaryChartColor}
                             dataKey="value"
                           >
                             {chartData.map((entry: any, index: number) => {
-                              // 使用图片中的颜色：紫色、粉色、浅蓝色
-                              const colors = ['#9370db', '#ffc0cb', '#87ceeb']; // 紫、粉、浅蓝
-                              return <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />;
+                              return <Cell key={`cell-${index}`} fill={chartPalette[index % chartPalette.length]} />;
                             })}
                           </Pie>
                           <Tooltip 
-                            contentStyle={{ backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: '4px' }}
-                            formatter={(value: any) => [typeof value === 'number' ? value.toFixed(2) : value, 'Value']}
-                          />
-                          <Legend 
-                            wrapperStyle={{ paddingTop: '20px', paddingLeft: '60%' }}
-                            formatter={(value) => 'Content'}
-                            iconType="circle"
-                            align="left"
-                            verticalAlign="middle"
-                            layout="vertical"
+                            contentStyle={tooltipBaseStyle}
+                            formatter={(value: any, name: any) => [
+                              typeof value === 'number' ? value.toFixed(2) : value,
+                              name
+                            ]}
                           />
                         </PieChart>
                       </ResponsiveContainer>
