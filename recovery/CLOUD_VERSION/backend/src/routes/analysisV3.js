@@ -132,6 +132,35 @@ const normalizeTimeRange = (input = {}) => {
   return { preset, from, to: now };
 };
 
+const normalizeHistoryPreset = (preset) => {
+  if (preset === '30d' || preset === '90d' || preset === 'custom') return preset;
+  return '7d';
+};
+
+const toDateString = (value) => {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getPresetLabel = (preset) => {
+  if (preset === 'custom') return '选定时间段';
+  if (preset === '30d') return '过去30天';
+  if (preset === '90d') return '过去90天';
+  return '过去7天';
+};
+
+const buildHistoryTitle = ({ notebookName, preset, noteCount, recordCount }) => {
+  const name = String(notebookName || '').trim() || '未命名笔记本';
+  const noteCountText = typeof noteCount === 'number' ? `·选${noteCount}条` : '';
+  const recordCountText = typeof recordCount === 'number' ? `·共${recordCount}条` : '';
+  return `${name}·${getPresetLabel(preset)}${noteCountText}${recordCountText}`;
+};
+
 const mapNoteType = (notebookType) => {
   const allowed = ['monitoring', 'developmental', 'archive'];
   if (allowed.includes(notebookType)) return notebookType;
@@ -681,7 +710,8 @@ export const initAnalysisV3Routes = ({ db, aiService } = {}) => {
         return res.status(400).json({ success: false, message: 'notebookId is required' });
       }
 
-      const timeRange = normalizeTimeRange(req.body?.timeRange || {});
+      const rawTimeRange = req.body?.timeRange || {};
+      const timeRange = normalizeTimeRange(rawTimeRange);
       const withDebug = Boolean(req.body?.withDebug);
       const noteIds = Array.isArray(req.body?.noteIds) ? req.body.noteIds.map((id) => String(id)) : [];
 
@@ -772,9 +802,34 @@ export const initAnalysisV3Routes = ({ db, aiService } = {}) => {
         from: timeRange.from ? timeRange.from.toISOString().slice(0, 10) : '',
         to: timeRange.to ? timeRange.to.toISOString().slice(0, 10) : ''
       };
+      const historyPreset = normalizeHistoryPreset(rawTimeRange?.preset || timeRange.preset);
+      const historyFrom = typeof rawTimeRange?.from === 'string' ? rawTimeRange.from : toDateString(timeRange.from);
+      const historyTo = typeof rawTimeRange?.to === 'string' ? rawTimeRange.to : toDateString(timeRange.to);
+      const historyRequest = {
+        preset: historyPreset,
+        ...(historyFrom ? { from: historyFrom } : {}),
+        ...(historyTo ? { to: historyTo } : {}),
+        ...(noteIds.length > 0 ? { noteIds } : {})
+      };
+      const notebookName = (notebook?.name || notebook?.description || '').trim() || notebookId;
+      const historyTitle = buildHistoryTitle({
+        notebookName,
+        preset: historyPreset,
+        noteCount: noteIds.length > 0 ? noteIds.length : undefined,
+        recordCount: noteCount
+      });
 
       const analysisData = {
         version: 'analysis_v3',
+        history: {
+          title: historyTitle,
+          request: historyRequest,
+          selectedChartKey: defaultKey || null
+        },
+        result: payload,
+        meta: payload.meta,
+        noteType: payload.noteType,
+        notebookType,
         selectedNotes: {
           notebookId,
           noteIds: parsedNotes.map((note) => note.id),
@@ -848,6 +903,43 @@ export const initAnalysisV3Routes = ({ db, aiService } = {}) => {
       return res.status(404).json({ success: false, message: 'debug expired' });
     }
     return res.json({ success: true, analysisId, debug: cached.debug });
+  });
+
+  router.delete('/api/analysis/v3/history', async (req, res) => {
+    try {
+      if (!db) {
+        return res.status(503).json({ success: false, message: 'database not connected' });
+      }
+      const notebookId = String(req.query?.notebookId || '').trim();
+      if (!notebookId) {
+        return res.status(400).json({ success: false, message: 'notebookId is required' });
+      }
+      const result = await db.run('DELETE FROM analysis_results WHERE notebook_id = ?', [notebookId]);
+      return res.json({ success: true, deleted: result?.changes || 0 });
+    } catch (error) {
+      console.error('[analysis-v3] failed to delete history by notebook:', error);
+      return res.status(500).json({ success: false, message: 'delete history failed' });
+    }
+  });
+
+  router.delete('/api/analysis/v3/history/:analysisId', async (req, res) => {
+    try {
+      if (!db) {
+        return res.status(503).json({ success: false, message: 'database not connected' });
+      }
+      const analysisId = String(req.params.analysisId || '').trim();
+      if (!analysisId) {
+        return res.status(400).json({ success: false, message: 'analysisId is required' });
+      }
+      const result = await db.run('DELETE FROM analysis_results WHERE id = ?', [analysisId]);
+      if (!result?.changes) {
+        return res.status(404).json({ success: false, message: 'history not found' });
+      }
+      return res.json({ success: true, deleted: result.changes });
+    } catch (error) {
+      console.error('[analysis-v3] failed to delete history:', error);
+      return res.status(500).json({ success: false, message: 'delete history failed' });
+    }
   });
 
   setInterval(() => {

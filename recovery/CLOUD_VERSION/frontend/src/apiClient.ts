@@ -809,30 +809,18 @@ class ApiClient {
     }
   }
 
-  async getAnalyses(): Promise<any> {
+  async getAnalyses(params?: { notebookId?: string; limit?: number; version?: string }): Promise<any> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/analysis`, {
-        credentials: 'include'
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => '未知错误');
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      const queryParams: Record<string, string> = {};
+      if (params?.notebookId) queryParams.notebookId = String(params.notebookId);
+      if (typeof params?.limit === 'number' && Number.isFinite(params.limit)) {
+        queryParams.limit = String(params.limit);
       }
-
-      let data;
-      try {
-        data = await response.json();
-      } catch (jsonError) {
-        console.error('❌ JSON解析失败:', jsonError);
-        throw new Error('服务器返回了无效的JSON格式');
-      }
-
-      if (data.success) {
-        return data;
-      } else {
-        throw new Error(data.message || '获取分析列表失败');
-      }
+      if (params?.version) queryParams.version = String(params.version);
+      const response = await this.get('/api/analysis', { params: queryParams });
+      const data = response?.data;
+      if (data?.success) return data;
+      throw new Error(data?.message || '获取分析列表失败');
     } catch (error: any) {
       console.error('❌ 获取分析列表失败:', error);
       throw error;

@@ -2483,14 +2483,27 @@ app.get('/api/analysis', async (req, res) => {
     }
 
     const queryStartTime = Date.now();
+    const notebookId = typeof req.query?.notebookId === 'string' ? req.query.notebookId.trim() : '';
+    const rawLimit = typeof req.query?.limit === 'string' ? req.query.limit.trim() : '';
+    const limit = rawLimit ? Number(rawLimit) : 0;
+    const versionFilter = typeof req.query?.version === 'string' ? req.query.version.trim() : '';
     
     // 查询分析结果（带超时保护，3秒超时）
     let analyses = [];
     try {
+      let sql = 'SELECT * FROM analysis_results';
+      const params = [];
+      if (notebookId) {
+        sql += ' WHERE notebook_id = ?';
+        params.push(notebookId);
+      }
+      sql += ' ORDER BY created_at DESC';
+      if (Number.isFinite(limit) && limit > 0) {
+        sql += ' LIMIT ?';
+        params.push(limit);
+      }
       analyses = await Promise.race([
-        db.all(
-          'SELECT * FROM analysis_results ORDER BY created_at DESC'
-        ),
+        db.all(sql, params),
         new Promise((resolve) => {
           setTimeout(() => {
             console.warn('⚠️ /api/analysis 查询超时（3秒），返回空列表');
@@ -2546,6 +2559,10 @@ app.get('/api/analysis', async (req, res) => {
       };
     });
 
+    const filteredAnalyses = versionFilter
+      ? formattedAnalyses.filter((analysis) => String(analysis.analysisData?.version || '') === versionFilter)
+      : formattedAnalyses;
+
     const queryTime = Date.now() - queryStartTime;
     if (queryTime > 1000) {
       console.warn(`⚠️ /api/analysis 查询耗时 ${queryTime}ms`);
@@ -2553,7 +2570,7 @@ app.get('/api/analysis', async (req, res) => {
 
     res.json({
       success: true,
-      data: formattedAnalyses
+      data: filteredAnalyses
     });
   } catch (error) {
     console.error('❌ 获取分析结果失败:', error);

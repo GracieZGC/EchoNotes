@@ -52,9 +52,7 @@ const getPieSliceColor = (index: number, total: number) => {
 };
 
 
-const ANALYSIS_HISTORY_STORAGE_KEY = 'analysisV2.history.v1';
 const ANALYSIS_HISTORY_MAX_SESSIONS = 30;
-const ANALYSIS_HISTORY_FALLBACK_SESSIONS = 10;
 const ANALYSIS_HISTORY_FALLBACK_MAX_ROWS = 200;
 
 const toDateInputValue = (date: Date) => {
@@ -131,16 +129,6 @@ const clampText = (value: string, max: number) => {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, max)}…`;
-};
-
-const safeParseArray = (raw: string | null) => {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
 };
 
 const parseDateValue = (value: unknown) => {
@@ -248,38 +236,6 @@ const compactAnalysisResultForStorage = (result: AnalysisV3Response, maxRowsPerC
   };
 };
 
-const normalizeAnalysisHistoryRecord = (raw: any): AnalysisHistoryRecord | null => {
-  if (!raw || typeof raw !== 'object') return null;
-  const record = raw as any;
-  const notebookId = String(record.notebookId || '');
-  const id = String(record.id || '');
-  const title = clampText(String(record.title || ''), 80) || '未命名分析';
-  const createdAt = Number(record.createdAt || Date.now());
-  const updatedAt = Number(record.updatedAt || createdAt || Date.now());
-  const request = record.request && typeof record.request === 'object' ? record.request : {};
-  const preset: AnalysisV3Preset =
-    request.preset === '30d' || request.preset === '90d' || request.preset === 'custom' ? request.preset : '7d';
-  const from = typeof request.from === 'string' ? request.from : undefined;
-  const to = typeof request.to === 'string' ? request.to : undefined;
-  const noteIds = Array.isArray(request.noteIds) ? request.noteIds.map((id: any) => String(id)) : undefined;
-  const selectedChartKey =
-    record.selectedChartKey === null || typeof record.selectedChartKey === 'string'
-      ? record.selectedChartKey
-      : null;
-  const result = record.result && typeof record.result === 'object' ? (record.result as AnalysisV3Response) : null;
-  if (!id || !notebookId || !result?.analysisId) return null;
-  return {
-    id,
-    notebookId,
-    title,
-    createdAt,
-    updatedAt,
-    request: { preset, from, to, noteIds },
-    selectedChartKey,
-    result
-  };
-};
-
 const resolveHistoryRange = (record: AnalysisHistoryRecord) => {
   const preset = record.request?.preset || '7d';
   if (record.request?.from && record.request?.to) {
@@ -307,37 +263,114 @@ const resolveHistoryRange = (record: AnalysisHistoryRecord) => {
 const normalizeNoteIds = (ids: string[]) =>
   Array.from(new Set(ids.map((id) => String(id)))).sort().join('|');
 
-const loadAnalysisHistory = (): AnalysisHistoryRecord[] => {
-  if (typeof window === 'undefined') return [];
-  const raw = window.localStorage.getItem(ANALYSIS_HISTORY_STORAGE_KEY);
-  const parsed = safeParseArray(raw);
-  if (!parsed) return [];
-  return parsed
-    .map((item) => normalizeAnalysisHistoryRecord(item))
-    .filter((item): item is AnalysisHistoryRecord => Boolean(item))
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, ANALYSIS_HISTORY_MAX_SESSIONS);
+const normalizeHistoryPreset = (preset: unknown): AnalysisV3Preset => {
+  if (preset === '30d' || preset === '90d' || preset === 'custom') return preset;
+  return '7d';
 };
 
-const saveAnalysisHistory = (history: AnalysisHistoryRecord[]) => {
-  if (typeof window === 'undefined') return;
-  const normalized = (history || [])
-    .filter((item) => item && typeof item === 'object')
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, ANALYSIS_HISTORY_MAX_SESSIONS);
-  try {
-    window.localStorage.setItem(ANALYSIS_HISTORY_STORAGE_KEY, JSON.stringify(normalized));
-  } catch (error) {
-    try {
-      const compact = normalized.slice(0, ANALYSIS_HISTORY_FALLBACK_SESSIONS).map((item) => ({
-        ...item,
-        result: compactAnalysisResultForStorage(item.result, ANALYSIS_HISTORY_FALLBACK_MAX_ROWS)
-      }));
-      window.localStorage.setItem(ANALYSIS_HISTORY_STORAGE_KEY, JSON.stringify(compact));
-    } catch {
-      console.warn('[analysis-v2] 保存分析历史失败:', error);
-    }
+const normalizeHistoryRequest = (analysisData: any, analysis: any): AnalysisHistoryRecord['request'] => {
+  const historyRequest = analysisData?.history?.request || analysisData?.request || {};
+  const preset = normalizeHistoryPreset(historyRequest?.preset);
+  const rangeFromHistory = typeof historyRequest?.from === 'string' ? historyRequest.from : undefined;
+  const rangeToHistory = typeof historyRequest?.to === 'string' ? historyRequest.to : undefined;
+  const range = analysisData?.selectedNotes?.dateRange || analysis?.metadata?.dataSource?.dateRange || {};
+  const rangeFrom = rangeFromHistory || (typeof range?.from === 'string' ? range.from : undefined);
+  const rangeTo = rangeToHistory || (typeof range?.to === 'string' ? range.to : undefined);
+  const rawNoteIds =
+    Array.isArray(historyRequest?.noteIds)
+      ? historyRequest.noteIds
+      : Array.isArray(analysisData?.selectedNotes?.noteIds)
+        ? analysisData.selectedNotes.noteIds
+        : Array.isArray(analysis?.metadata?.dataSource?.noteIds)
+          ? analysis.metadata.dataSource.noteIds
+          : undefined;
+  const noteIds = Array.isArray(rawNoteIds) ? rawNoteIds.map((id: any) => String(id)) : undefined;
+  const resolvedPreset = !historyRequest?.preset && rangeFrom && rangeTo ? 'custom' : preset;
+  return {
+    preset: resolvedPreset,
+    ...(rangeFrom ? { from: rangeFrom } : {}),
+    ...(rangeTo ? { to: rangeTo } : {}),
+    ...(noteIds && noteIds.length > 0 ? { noteIds } : {})
+  };
+};
+
+const normalizeChartsPayload = (charts: any) => {
+  const items = Array.isArray(charts?.items) ? charts.items : [];
+  const defaultKey = String(charts?.defaultKey || items[0]?.key || '');
+  return { defaultKey, items };
+};
+
+const buildAnalysisResultFromAnalysis = (analysis: any): AnalysisV3Response | null => {
+  if (!analysis || typeof analysis !== 'object') return null;
+  const analysisData = analysis.analysisData && typeof analysis.analysisData === 'object' ? analysis.analysisData : {};
+  const rawResult = analysisData.result && typeof analysisData.result === 'object' ? analysisData.result : null;
+  if (rawResult) {
+    return {
+      ...rawResult,
+      analysisId: String(rawResult.analysisId || analysis.id || ''),
+      charts: normalizeChartsPayload(rawResult.charts)
+    } as AnalysisV3Response;
   }
+  const charts = normalizeChartsPayload(analysisData.charts);
+  const insights = Array.isArray(analysisData.insights)
+    ? analysisData.insights
+    : Array.isArray(analysisData?.componentConfigs?.['ai-custom']?.insights)
+      ? analysisData.componentConfigs['ai-custom'].insights
+      : [];
+  const recordCount = Number(
+    analysisData?.meta?.recordCount ||
+      analysisData?.componentConfigs?.chart?.processedData?.metadata?.noteCount ||
+      analysisData?.selectedNotes?.noteIds?.length ||
+      0
+  );
+  return {
+    analysisId: String(analysis.id || ''),
+    meta: {
+      recordCount,
+      startAt: analysisData?.meta?.startAt ?? null,
+      endAt: analysisData?.meta?.endAt ?? null
+    },
+    notebookType: analysis.notebookType || analysisData.notebookType,
+    noteType: analysisData.noteType,
+    insights: Array.isArray(insights) ? insights : [],
+    insightsByChartKey: analysisData.insightsByChartKey || rawResult?.insightsByChartKey,
+    charts,
+    cache: analysisData?.cache || rawResult?.cache || { hit: false, ttlSec: 0 }
+  } as AnalysisV3Response;
+};
+
+const buildHistoryRecordFromAnalysis = (analysis: any): AnalysisHistoryRecord | null => {
+  if (!analysis || typeof analysis !== 'object') return null;
+  const analysisData = analysis.analysisData && typeof analysis.analysisData === 'object' ? analysis.analysisData : {};
+  const result = buildAnalysisResultFromAnalysis(analysis);
+  const analysisId = String(analysisData?.history?.id || result?.analysisId || analysis.id || '');
+  const notebookId = String(
+    analysis.notebookId ||
+      analysisData?.selectedNotes?.notebookId ||
+      analysis?.metadata?.dataSource?.notebookId ||
+      ''
+  );
+  if (!analysisId || !notebookId || !result?.analysisId) return null;
+  const createdAtRaw = analysis.metadata?.createdAt || analysis.createdAt || '';
+  const updatedAtRaw = analysis.metadata?.updatedAt || analysis.updatedAt || analysis.metadata?.createdAt || '';
+  const createdAt = Number.isFinite(Date.parse(createdAtRaw)) ? Date.parse(createdAtRaw) : Date.now();
+  const updatedAt = Number.isFinite(Date.parse(updatedAtRaw)) ? Date.parse(updatedAtRaw) : createdAt;
+  const request = normalizeHistoryRequest(analysisData, analysis);
+  const title = typeof analysisData?.history?.title === 'string' ? analysisData.history.title : '';
+  const selectedChartKey =
+    analysisData?.history?.selectedChartKey === null || typeof analysisData?.history?.selectedChartKey === 'string'
+      ? analysisData.history.selectedChartKey
+      : null;
+  return {
+    id: analysisId,
+    notebookId,
+    title: clampText(title || '未命名分析', 80),
+    createdAt,
+    updatedAt,
+    request,
+    selectedChartKey,
+    result: compactAnalysisResultForStorage(result, ANALYSIS_HISTORY_FALLBACK_MAX_ROWS)
+  };
 };
 
 type ChartMeta = {
@@ -473,6 +506,9 @@ const getChartMappingSegments = (chart: AnalysisV3ChartItem, preset: AnalysisV3P
     `Y轴：${mapFieldToZh(yKey, chart)}`
   ];
 };
+
+const HIGHLIGHT_MIN_LEN = 6;
+const HIGHLIGHT_MAX_LEN = 24;
 
 const highlightSegments = (text: string) => {
   const raw = String(text || '');
@@ -626,6 +662,34 @@ const renderEmphasizedHeadline = (text: string, keyPrefix: string, insightKey: s
   const stripLeadingVerbs = (s: string) =>
     s.replace(/^(关注|聚焦|集中在|围绕|偏向|主要集中在|主要关注)\s*/g, '');
 
+  const normalizeHighlightText = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return '';
+    if (trimmed.length <= HIGHLIGHT_MAX_LEN) return trimmed;
+    const delimiters = ['，', '。', '；', '、', '\n'];
+    const cutIdx = delimiters
+      .map((ch) => trimmed.indexOf(ch))
+      .filter((idx) => idx >= HIGHLIGHT_MIN_LEN && idx <= HIGHLIGHT_MAX_LEN)
+      .sort((a, b) => a - b)[0];
+    if (typeof cutIdx === 'number') return trimmed.slice(0, cutIdx);
+    return trimmed.slice(0, HIGHLIGHT_MAX_LEN);
+  };
+
+  const trimTrailingAnalysisSuffix = (text: string) => {
+    const match = text.match(
+      /^(.*)的[^，。；\n]{0,12}?(分析|研究|判断|梳理|归纳|总结|拆解|评估|验证|对比|洞察|观察|检验)(?:上|中|里|方面|维度)?$/
+    );
+    if (match && match[1]) return match[1];
+    return text;
+  };
+
+  const findPatternVerbIndex = (input: string) => {
+    const re =
+      /(建议(?:重点|优先)?(?:关注|聚焦|从|考虑|尝试|强化|提升|优化)?|可(?:以)?(?:放在|聚焦|集中|关注|侧重|围绕|从|考虑|尝试|强化|提升|优化)|(?:优先|重点)(?:关注|聚焦|考虑|尝试|强化|提升|优化)?)/;
+    const match = re.exec(input);
+    return match && typeof match.index === 'number' ? match.index : -1;
+  };
+
   let emphasisStart = -1;
   let emphasisText = '';
 
@@ -677,10 +741,31 @@ const renderEmphasizedHeadline = (text: string, keyPrefix: string, insightKey: s
       }
     }
   } else if (insightKey === 'pattern') {
-    const candidate = pickByDelimiters(raw, 0).trim();
-    if (candidate && candidate.length < raw.length) {
-      emphasisStart = raw.indexOf(candidate);
-      emphasisText = candidate;
+    const verbIdx = findPatternVerbIndex(raw);
+    if (verbIdx >= 0) {
+      let candidate = pickByDelimiters(raw.slice(verbIdx), 0).trim();
+      candidate = trimTrailingAnalysisSuffix(candidate).trim();
+      if (candidate) {
+        emphasisStart = verbIdx;
+        emphasisText = candidate;
+      }
+    }
+    if (emphasisStart < 0) {
+      const fallback = pickByDelimiters(raw, 0).trim();
+      if (fallback && fallback.length < raw.length) {
+        emphasisStart = raw.indexOf(fallback);
+        emphasisText = fallback;
+      }
+    }
+  }
+
+  if (emphasisStart >= 0 && emphasisText) {
+    const normalized = normalizeHighlightText(emphasisText);
+    if (!normalized || normalized.length < HIGHLIGHT_MIN_LEN) {
+      emphasisStart = -1;
+      emphasisText = '';
+    } else {
+      emphasisText = normalized;
     }
   }
 
@@ -1167,6 +1252,7 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
   const notesRequestIdRef = useRef(0);
   const analysisRequestIdRef = useRef(0);
   const debugRequestIdRef = useRef(0);
+  const historyRequestIdRef = useRef(0);
   const [notes, setNotes] = useState<Note[]>([]);
   const [loadingNotes, setLoadingNotes] = useState(false);
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
@@ -1192,7 +1278,6 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
   const [showingHistoryId, setShowingHistoryId] = useState<string | null>(null);
   const [analysisConfirmOpen, setAnalysisConfirmOpen] = useState(false);
   const [matchedHistory, setMatchedHistory] = useState<AnalysisHistoryRecord | null>(null);
-  const historyLoadedRef = useRef(false);
   const [historyPanelPos, setHistoryPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const NONE_HOVER_ID = '__none__';
 
@@ -1213,36 +1298,46 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
     return raw ? raw.trim() : null;
   }, [location.search]);
 
+  const fetchAnalysisHistory = useCallback(
+    async (targetNotebookId?: string | null) => {
+      const requestId = (historyRequestIdRef.current += 1);
+      try {
+        const response = await apiClient.getAnalyses({
+          notebookId: targetNotebookId || undefined,
+          limit: ANALYSIS_HISTORY_MAX_SESSIONS,
+          version: 'analysis_v3'
+        });
+        if (!mountedRef.current || requestId !== historyRequestIdRef.current) return;
+        const list = Array.isArray(response?.data) ? response.data : [];
+        const next = list
+          .map((item: any) => buildHistoryRecordFromAnalysis(item))
+          .filter((item: any): item is AnalysisHistoryRecord => Boolean(item))
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, ANALYSIS_HISTORY_MAX_SESSIONS);
+        setAnalysisHistory(next);
+      } catch (loadError) {
+        console.error('[analysis-v2] failed to load analysis history:', loadError);
+        if (!mountedRef.current || requestId !== historyRequestIdRef.current) return;
+        setAnalysisHistory([]);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
-    const history = loadAnalysisHistory();
-    setAnalysisHistory(history);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    fetchAnalysisHistory(notebookId);
+  }, [fetchAnalysisHistory, notebookId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const handleRefresh = () => {
-      setAnalysisHistory(loadAnalysisHistory());
-    };
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key !== ANALYSIS_HISTORY_STORAGE_KEY) return;
-      setAnalysisHistory(loadAnalysisHistory());
+      fetchAnalysisHistory(notebookId);
     };
     window.addEventListener('analysis:refresh', handleRefresh);
-    window.addEventListener('storage', handleStorage);
     return () => {
       window.removeEventListener('analysis:refresh', handleRefresh);
-      window.removeEventListener('storage', handleStorage);
     };
-  }, []);
-
-  useEffect(() => {
-    if (!historyLoadedRef.current) {
-      historyLoadedRef.current = true;
-      return;
-    }
-    saveAnalysisHistory(analysisHistory);
-  }, [analysisHistory]);
+  }, [fetchAnalysisHistory, notebookId]);
 
   const resolveNotebookName = useCallback(
     (id: string) => {
@@ -1261,6 +1356,36 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
     },
     [resolveNotebookName]
   );
+
+  const clearHistoryForNotebook = useCallback(async (targetNotebookId: string | null) => {
+    if (!targetNotebookId) return false;
+    try {
+      await apiClient.delete(`/api/analysis/v3/history?notebookId=${encodeURIComponent(targetNotebookId)}`);
+      setAnalysisHistory((prev) => prev.filter((item) => item.notebookId !== targetNotebookId));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('analysis:refresh'));
+      }
+      return true;
+    } catch (error) {
+      console.error('[analysis-v2] failed to clear history:', error);
+      return false;
+    }
+  }, []);
+
+  const deleteHistoryById = useCallback(async (historyId: string) => {
+    if (!historyId) return false;
+    try {
+      await apiClient.delete(`/api/analysis/v3/history/${encodeURIComponent(historyId)}`);
+      setAnalysisHistory((prev) => prev.filter((item) => item.id !== historyId));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('analysis:refresh'));
+      }
+      return true;
+    } catch (error) {
+      console.error('[analysis-v2] failed to delete history:', error);
+      return false;
+    }
+  }, []);
 
   const updateHistoryPanelPos = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -1377,6 +1502,28 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
   useEffect(() => {
     loadNotebooks();
   }, [loadNotebooks]);
+
+  useEffect(() => {
+    if (!analysisHistory.length || !notebooks.length) return;
+    setAnalysisHistory((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (item.title && item.title !== '未命名分析') return item;
+        const nextTitle = makeHistoryTitle({
+          notebookId: item.notebookId,
+          preset: item.request.preset,
+          noteCount: item.request.noteIds?.length,
+          recordCount: Number(item.result?.meta?.recordCount || 0)
+        });
+        if (nextTitle && nextTitle !== item.title) {
+          changed = true;
+          return { ...item, title: nextTitle };
+        }
+        return item;
+      });
+      return changed ? next : prev;
+    });
+  }, [analysisHistory, notebooks, makeHistoryTitle]);
 
   const loadNotes = useCallback(async () => {
     const requestId = (notesRequestIdRef.current += 1);
@@ -1640,7 +1787,7 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
       setShowingHistoryId(null);
 
       const now = Date.now();
-      const historyId = generateHistoryId();
+      const historyId = String(result?.analysisId || generateHistoryId());
       const title = makeHistoryTitle({
         notebookId,
         preset: timePreset,
@@ -1660,13 +1807,13 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
           noteIds: selectedNoteIds.length > 0 ? selectedNoteIds : undefined
         },
         selectedChartKey: defaultKey,
-        result: compactAnalysisResultForStorage(result)
+        result: compactAnalysisResultForStorage(result, ANALYSIS_HISTORY_FALLBACK_MAX_ROWS)
       };
       setCurrentHistoryId(historyId);
       setHistoryRange(timePreset === 'custom' ? null : resolvedHistoryRange);
       setAnalysisHistory((prev) => {
-        const next = [historyRecord, ...(prev || [])].slice(0, ANALYSIS_HISTORY_MAX_SESSIONS);
-        saveAnalysisHistory(next);
+        const filtered = (prev || []).filter((item) => item.id !== historyId);
+        const next = [historyRecord, ...filtered].slice(0, ANALYSIS_HISTORY_MAX_SESSIONS);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new Event('analysis:refresh'));
         }
@@ -1803,11 +1950,9 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    setAnalysisHistory((prev) => {
-                      if (!notebookId) return [];
-                      return prev.filter((item) => item.notebookId !== notebookId);
-                    });
+                  onClick={async () => {
+                    const ok = await clearHistoryForNotebook(notebookId);
+                    if (!ok) return;
                     setAnalysisHistoryOpen(false);
                     setCurrentHistoryId(null);
                     setAnalysisResult(null);
@@ -1901,8 +2046,9 @@ const AnalysisV2OnDemandPage = ({ notebookIdOverride }: AnalysisV2OnDemandPagePr
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            setAnalysisHistory((prev) => prev.filter((item) => item.id !== session.id));
+                          onClick={async () => {
+                            const ok = await deleteHistoryById(session.id);
+                            if (!ok) return;
                             if (session.id === currentHistoryId) {
                               setCurrentHistoryId(null);
                               setAnalysisResult(null);

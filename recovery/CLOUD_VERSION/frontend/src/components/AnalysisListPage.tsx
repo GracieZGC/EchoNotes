@@ -7,8 +7,6 @@ import { getFullAnalysisUrl } from '../utils/analysisId';
 
 type AnalysisFilterType = NotebookType | 'all' | 'unknown';
 
-const ANALYSIS_V2_HISTORY_STORAGE_KEY = 'analysisV2.history.v1';
-
 const getErrorMessage = (err: unknown, fallback: string) => {
   if (!err) return fallback;
   if (err instanceof Error && err.message) return err.message;
@@ -61,9 +59,17 @@ const normalizeNotebookType = (value: unknown): AnalysisFilterType => {
 };
 
 const getNotebookIdFromAnalysis = (analysis: AnalysisResult) =>
-  analysis.metadata?.dataSource?.notebookId || (analysis as any).notebookId || '';
+  analysis.metadata?.dataSource?.notebookId ||
+  (analysis as any).notebookId ||
+  (analysis as any).analysisData?.selectedNotes?.notebookId ||
+  '';
 const getHistoryIdFromAnalysis = (analysis: AnalysisResult) =>
-  analysis.metadata?.dataSource?.historyId || (analysis as any).historyId || '';
+  analysis.metadata?.dataSource?.historyId ||
+  (analysis as any).historyId ||
+  (analysis as any).analysisData?.history?.id ||
+  (analysis as any).analysisData?.result?.analysisId ||
+  analysis.id ||
+  '';
 
 const getAnalysisUpdatedAtMs = (analysis: AnalysisResult) => {
   const updatedAt =
@@ -76,98 +82,6 @@ const getAnalysisUpdatedAtMs = (analysis: AnalysisResult) => {
   return Number.isFinite(ms) ? ms : 0;
 };
 
-type AnalysisV2HistoryRecord = {
-  id: string;
-  notebookId: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  request?: {
-    preset?: string;
-    from?: string;
-    to?: string;
-    noteIds?: string[];
-  };
-  result?: {
-    analysisId?: string;
-    notebookType?: string;
-    meta?: { recordCount?: number };
-  };
-};
-
-const loadAnalysisV2History = (): AnalysisV2HistoryRecord[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(ANALYSIS_V2_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item) => item && typeof item === 'object')
-      .map((item) => {
-        const record = item as any;
-        return {
-          id: String(record.id || ''),
-          notebookId: String(record.notebookId || ''),
-          title: String(record.title || ''),
-          createdAt: Number(record.createdAt || Date.now()),
-          updatedAt: Number(record.updatedAt || Date.now()),
-          request: record.request,
-          result: record.result
-        } as AnalysisV2HistoryRecord;
-      })
-      .filter((item) => Boolean(item.id) && Boolean(item.notebookId));
-  } catch {
-    return [];
-  }
-};
-
-const buildAnalysesFromV2History = (history: AnalysisV2HistoryRecord[]): AnalysisResult[] => {
-  const latestByNotebook = new Map<string, AnalysisV2HistoryRecord>();
-  for (const item of history) {
-    const notebookId = String(item.notebookId || '');
-    if (!notebookId) continue;
-    const existing = latestByNotebook.get(notebookId);
-    if (!existing || Number(item.updatedAt || 0) >= Number(existing.updatedAt || 0)) {
-      latestByNotebook.set(notebookId, item);
-    }
-  }
-
-  return Array.from(latestByNotebook.values()).map((record) => {
-    const createdAtIso = new Date(Number(record.createdAt || Date.now())).toISOString();
-    const updatedAtIso = new Date(Number(record.updatedAt || record.createdAt || Date.now())).toISOString();
-    const noteIds = Array.isArray(record.request?.noteIds) ? record.request?.noteIds : [];
-    const recordCount = Number((record.result as any)?.meta?.recordCount || 0);
-    const analysisId = String((record.result as any)?.analysisId || record.id || '');
-    return {
-      id: analysisId,
-      notebookId: record.notebookId,
-      notebookType: (record.result as any)?.notebookType,
-      mode: 'ai',
-      selectedAnalysisComponents: ['chart', 'insight'],
-      analysisData: {
-        title: record.title,
-        meta: (record.result as any)?.meta,
-        selectedNotes: {
-          notebookId: record.notebookId,
-          noteIds,
-          dateRange: record.request?.from && record.request?.to ? { from: record.request.from, to: record.request.to } : null
-        }
-      },
-      metadata: {
-        createdAt: createdAtIso,
-        updatedAt: updatedAtIso,
-        dataSource: {
-          notebookId: record.notebookId,
-          noteIds,
-          recordCount,
-          historyId: record.id
-        }
-      },
-      historyId: record.id
-    } as any as AnalysisResult;
-  });
-};
 
 // 分析结果项组件
 const AnalysisItem = ({
@@ -347,7 +261,7 @@ const AnalysisItem = ({
                       }
                       if (window.confirm('确定删除这个分析结果吗？')) {
                         try {
-                          await apiClient.delete(`/api/analysis/${analysis.id}`);
+                          await apiClient.delete(`/api/analysis/v3/history/${analysis.id}`);
                           window.dispatchEvent(new Event('analysis:refresh'));
                         } catch (error) {
                           console.error('删除失败:', error);
@@ -419,14 +333,14 @@ const AnalysisListPage: React.FC = () => {
     };
   }, []);
 
-  // 获取分析列表（基于 /analysis/v2 的本地历史）
+  // 获取分析列表（后端历史）
   const fetchAnalyses = useCallback(async () => {
     const requestId = (analysesRequestIdRef.current += 1);
     try {
       setLoading(true);
       setError(null);
-      const history = loadAnalysisV2History();
-      const list = buildAnalysesFromV2History(history);
+      const response = await apiClient.getAnalyses({ version: 'analysis_v3' });
+      const list = Array.isArray(response?.data) ? response.data : [];
       if (!mountedRef.current || requestId !== analysesRequestIdRef.current) return;
       setAnalyses(list);
     } catch (err: unknown) {
@@ -470,19 +384,18 @@ const AnalysisListPage: React.FC = () => {
 
   const deleteHistoryByNotebookId = useCallback(
     (targetNotebookId: string) => {
-      if (typeof window === 'undefined') return;
       if (!targetNotebookId) return;
       if (!window.confirm('确定删除该笔记本的所有分析历史吗？')) return;
-      try {
-        const history = loadAnalysisV2History();
-        const next = history.filter((item) => String(item.notebookId) !== String(targetNotebookId));
-        window.localStorage.setItem(ANALYSIS_V2_HISTORY_STORAGE_KEY, JSON.stringify(next));
-        showNotice('已删除分析历史');
-        window.dispatchEvent(new Event('analysis:refresh'));
-      } catch (err) {
-        console.error('[AnalysisListPage] 删除分析历史失败:', err);
-        showNotice('删除失败，请重试');
-      }
+      (async () => {
+        try {
+          await apiClient.delete(`/api/analysis/v3/history?notebookId=${encodeURIComponent(targetNotebookId)}`);
+          showNotice('已删除分析历史');
+          window.dispatchEvent(new Event('analysis:refresh'));
+        } catch (err) {
+          console.error('[AnalysisListPage] 删除分析历史失败:', err);
+          showNotice('删除失败，请重试');
+        }
+      })();
     },
     [showNotice]
   );
